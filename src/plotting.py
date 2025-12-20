@@ -1,98 +1,123 @@
 from __future__ import annotations
+
+from typing import Optional
 import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
 
-from config import style_axes, LAMBDA_BAND_HZ, ALPHA_BAND_HZ
+from config import LAMBDA_BAND_HZ, ALPHA_BAND_HZ, style_axes
 from signal_analysis import compute_psd, extract_lambda_signal, sliding_window_power
 
-def make_raw_figure(t: np.ndarray, x: np.ndarray, fs_hz: float, title: str, for_pdf: bool = False) -> Figure:
-    fig = Figure(figsize=(10, 4), dpi=110 if not for_pdf else 120)
-    ax1 = fig.add_subplot(1, 2, 1)
-    ax2 = fig.add_subplot(1, 2, 2)
-    style_axes(ax1); style_axes(ax2)
 
-    max_over = min(len(x), int(10 * fs_hz))
-    max_zoom = min(len(x), int(4 * fs_hz))
+def _nice_title(file_name: str, channel_label: str, kind: str) -> str:
+    base = file_name
+    if channel_label:
+        return f"{kind} — {base} | канал/электрод: {channel_label}"
+    return f"{kind} — {base}"
 
-    ax1.plot(t[:max_over], x[:max_over], linewidth=1.5)
-    ax1.axhline(0, linestyle="--", linewidth=0.9, alpha=0.7)
-    ax1.set_title(f"{title}\nПервые {max_over / fs_hz:.1f} с", fontsize=10)
-    ax1.set_xlabel("Время, с")
-    ax1.set_ylabel("Амплитуда")
 
-    ax2.plot(t[:max_zoom], x[:max_zoom], linewidth=1.6)
-    ax2.axhline(0, linestyle="--", linewidth=0.9, alpha=0.7)
-    ax2.set_title(f"{title}\nЗум 4.0 с", fontsize=10)
-    ax2.set_xlabel("Время, с")
-    ax2.set_ylabel("Амплитуда")
-
-    fig.tight_layout()
-    return fig
-
-def make_psd_figure(x: np.ndarray, fs_hz: float, title: str, for_pdf: bool = False) -> Figure:
-    fig = Figure(figsize=(10, 3.5), dpi=110 if not for_pdf else 120)
+def make_raw_figure(t, x, fs_hz, name, channel_label: str = "", for_pdf: bool = False):
+    fig = Figure(figsize=(9.2, 3.6) if for_pdf else (9.0, 3.4), dpi=120)
     ax = fig.add_subplot(111)
     style_axes(ax)
 
-    freqs, psd = compute_psd(x, fs_hz=fs_hz, nperseg=1024)
-    ax.semilogy(freqs, psd, linewidth=1.4, label="PSD")
-    ax.axvspan(LAMBDA_BAND_HZ[0], LAMBDA_BAND_HZ[1], alpha=0.18, label="λ (4–6 Гц)")
-    ax.axvspan(ALPHA_BAND_HZ[0], ALPHA_BAND_HZ[1], alpha=0.18, label="α (7–13 Гц)")
-    ax.set_xlim(0, 30)
+    ax.plot(t, x, linewidth=1.6)
+    ax.set_title(_nice_title(name, channel_label, "Сигнал во времени"), fontsize=12)
+    ax.set_xlabel("Время, с")
+    ax.set_ylabel("Амплитуда, усл. ед.")
+    return fig
+
+
+def make_psd_figure(
+        x: np.ndarray,
+        fs_hz: float,
+        file_label: str,
+        channel_label: Optional[str] = None,
+        for_pdf: bool = False,
+) -> Figure:
+    fig = Figure(figsize=(10, 3.3) if for_pdf else (10, 3.6), dpi=110)
+    ax = fig.add_subplot(111)
+    style_axes(ax)
+
+    freqs, psd = compute_psd(np.asarray(x, dtype=float), fs_hz=float(fs_hz), nperseg=1024)
+    if freqs.size and psd.size:
+        ax.plot(freqs, psd, linewidth=1.3)
+        ax.axvspan(LAMBDA_BAND_HZ[0], LAMBDA_BAND_HZ[1], alpha=0.18,
+                   label=f"λ: {LAMBDA_BAND_HZ[0]}–{LAMBDA_BAND_HZ[1]} Гц")
+        ax.axvspan(ALPHA_BAND_HZ[0], ALPHA_BAND_HZ[1], alpha=0.10,
+                   label=f"α: {ALPHA_BAND_HZ[0]}–{ALPHA_BAND_HZ[1]} Гц")
+        ax.set_xlim(0, 40)
+        ax.legend(fontsize=9, loc="upper right")
+
+    ax.set_title(_nice_title("Спектр мощности (PSD, Welch)", file_label, channel_label), fontsize=12)
     ax.set_xlabel("Частота, Гц")
-    ax.set_ylabel("PSD, у.е.")
-    ax.set_title(f"{title} — спектр мощности", fontsize=11)
-    ax.legend(fontsize=9)
-
-    fig.tight_layout()
+    ax.set_ylabel("PSD, усл. ед.")
+    ax.grid(True, alpha=0.25)
     return fig
 
-def make_lambda_figure(t: np.ndarray, x: np.ndarray, fs_hz: float, title: str, for_pdf: bool = False) -> Figure:
-    fig = Figure(figsize=(10, 4), dpi=110 if not for_pdf else 120)
-    ax1 = fig.add_subplot(1, 2, 1)
-    ax2 = fig.add_subplot(1, 2, 2)
-    style_axes(ax1); style_axes(ax2)
 
-    lam = extract_lambda_signal(x, fs_hz=fs_hz)
-    max_samp = min(len(x), int(8 * fs_hz))
+def make_lambda_figure(
+        t: np.ndarray,
+        x: np.ndarray,
+        fs_hz: float,
+        file_label: str,
+        channel_label: Optional[str] = None,
+        for_pdf: bool = False,
+) -> Figure:
+    fig = Figure(figsize=(10, 4.6) if for_pdf else (10, 5.0), dpi=110)
+    ax1 = fig.add_subplot(211)
+    ax2 = fig.add_subplot(212)
+    style_axes(ax1)
+    style_axes(ax2)
 
-    ax1.plot(t[:max_samp], x[:max_samp], linewidth=1.2, label="ЭЭГ")
-    ax1.plot(t[:max_samp], lam[:max_samp], linewidth=1.7, alpha=0.95, label="λ (4–6 Гц)")
-    ax1.axhline(0, linestyle="--", linewidth=0.9, alpha=0.7)
-    ax1.set_title(f"{title}\nЭЭГ и λ-ритм", fontsize=10)
+    t = np.asarray(t, dtype=float)
+    x = np.asarray(x, dtype=float)
+
+    lam = extract_lambda_signal(x, fs_hz=float(fs_hz))
+    ax1.plot(t, lam, linewidth=1.1)
+    ax1.set_title(_nice_title(f"Полосовой фильтр λ ({LAMBDA_BAND_HZ[0]}–{LAMBDA_BAND_HZ[1]} Гц)",
+                         file_label, channel_label), fontsize=12)
     ax1.set_xlabel("Время, с")
-    ax1.set_ylabel("Амплитуда")
-    ax1.legend(fontsize=9)
+    ax1.set_ylabel("Амплитуда, усл. ед.")
+    ax1.grid(True, alpha=0.25)
 
-    t_win, p_win = sliding_window_power(lam, fs_hz=fs_hz, window_sec=2.0, overlap=0.5)
-    ax2.plot(t_win, p_win, linewidth=1.6)
-    ax2.set_title(f"{title}\nМощность λ(t)", fontsize=10)
+    tw, pw = sliding_window_power(lam, fs_hz=float(fs_hz), window_sec=2.0, overlap=0.5)
+    if tw.size and pw.size:
+        ax2.plot(tw, pw, linewidth=1.2)
+    ax2.set_title("Динамика мощности λ(t) (скользящее окно)", fontsize=11)
     ax2.set_xlabel("Время, с")
-    ax2.set_ylabel("mean(x²)")
+    ax2.set_ylabel("Мощность, усл. ед.")
+    ax2.grid(True, alpha=0.25)
 
-    fig.tight_layout()
+    fig.tight_layout(pad=1.0)
     return fig
+
 
 def make_bars_figure(summary_df: pd.DataFrame, metric: str = "Средняя мощность λ(t)") -> Figure:
-    df = summary_df.copy().sort_values(metric, ascending=True)
-    labels = df["Файл"].astype(str).values
-    vals = df[metric].values
-
-    h = max(4.8, 0.55 * len(labels) + 2.0)
-    fig = Figure(figsize=(10, h), dpi=120)
+    fig = Figure(figsize=(10, 3.8), dpi=110)
     ax = fig.add_subplot(111)
     style_axes(ax)
 
-    y = np.arange(len(labels))
-    ax.barh(y, vals)
-    ax.set_yticks(y)
-    ax.set_yticklabels(labels, fontsize=9)
-    ax.set_xlabel("Мощность, у.е.")
-    ax.set_title(metric)
+    if summary_df is None or summary_df.empty or metric not in summary_df.columns:
+        ax.set_title("Нет данных для сравнения")
+        return fig
 
-    ax.grid(True, axis="x", alpha=0.55)
-    ax.grid(False, axis="y")
+    df = summary_df.copy()
+    df[metric] = pd.to_numeric(df[metric], errors="coerce")
+    df = df.dropna(subset=[metric])
 
-    fig.tight_layout()
+    labels = []
+    values = []
+    for _, r in df.iterrows():
+        lab = f"{r.get('Файл', '')}\n{r.get('Электрод/канал', '')}"
+        labels.append(lab)
+        values.append(float(r[metric]))
+
+    ax.bar(range(len(values)), values)
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, fontsize=9)
+    ax.set_title(f"Сравнение: {metric}", fontsize=12)
+    ax.set_ylabel(metric)
+    ax.grid(True, axis="y", alpha=0.25)
+    fig.tight_layout(pad=1.0)
     return fig

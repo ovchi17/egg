@@ -1,6 +1,6 @@
 from __future__ import annotations
 import os
-from typing import Tuple
+from typing import Tuple, List
 import numpy as np
 import pandas as pd
 from config import FS_HZ_DEFAULT
@@ -101,14 +101,15 @@ def estimate_fs_from_time(t: np.ndarray, fallback: float = FS_HZ_DEFAULT) -> flo
         return fallback
     return fs
 
-def load_time_and_channel(csv_path: str, channel: str):
+def load_time_and_channel(csv_path: str, channel: str) -> Tuple[np.ndarray, np.ndarray, str, str]:
     df = _try_read_csv(csv_path)
 
-    def to_num(s):
+    def to_num(s: pd.Series) -> pd.Series:
         if s.dtype == object:
             s = s.astype(str).str.replace(",", ".", regex=False)
         return pd.to_numeric(s, errors="coerce")
 
+    # ищем колонку времени (если есть)
     time_col = None
     for c in df.columns:
         if "time" in str(c).lower() or "время" in str(c).lower():
@@ -118,10 +119,10 @@ def load_time_and_channel(csv_path: str, channel: str):
     if channel not in df.columns:
         raise ValueError(f"Нет канала {channel}")
 
-    x = to_num(df[channel]).to_numpy()
+    x = to_num(df[channel]).to_numpy(dtype=float)
 
-    if time_col:
-        t = to_num(df[time_col]).to_numpy()
+    if time_col is not None:
+        t = to_num(df[time_col]).to_numpy(dtype=float)
         mask = np.isfinite(t) & np.isfinite(x)
         t, x = t[mask], x[mask]
         if len(t) > 2 and not np.all(np.diff(t) > 0):
@@ -133,3 +134,33 @@ def load_time_and_channel(csv_path: str, channel: str):
 
     n = min(len(t), len(x))
     return t[:n], x[:n], time_col, channel
+
+def list_numeric_channels(csv_path: str) -> Tuple[List[str], str]:
+    """
+    Возвращает список числовых каналов (кандидаты на EEG/электроды) и имя колонки времени.
+    Логика: время ищем по названию, каналы = числовые колонки кроме времени.
+    """
+    df = _try_read_csv(csv_path)
+
+    def to_num(s: pd.Series) -> pd.Series:
+        if s.dtype == object:
+            s = s.astype(str).str.replace(",", ".", regex=False)
+        return pd.to_numeric(s, errors="coerce")
+
+    # время
+    time_col = None
+    for c in df.columns:
+        if "time" in str(c).lower() or "время" in str(c).lower():
+            time_col = c
+            break
+
+    numeric_cols: List[str] = []
+    for c in df.columns:
+        sn = to_num(df[c])
+        if sn.notna().sum() >= max(5, int(0.05 * len(df))):
+            numeric_cols.append(str(c))
+
+    # каналы = числовые кроме времени
+    channels = [c for c in numeric_cols if time_col is None or c != time_col]
+
+    return channels, (time_col if time_col is not None else "synthetic_time")

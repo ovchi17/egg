@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 import matplotlib
+
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -22,10 +23,20 @@ from matplotlib import font_manager
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+# Optional MNE (for 10–20 montage coordinates)
+try:
+    import mne
+
+    MNE_OK = True
+except Exception:
+    mne = None  # type: ignore
+    MNE_OK = False
+
 # --- optional deps ---
 DND_OK = False
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
+
     DND_OK = True
 except (ImportError, ModuleNotFoundError):
     DND_OK = False
@@ -34,6 +45,7 @@ SERIAL_OK = False
 try:
     import serial
     import serial.tools.list_ports
+
     SERIAL_OK = True
 except (ImportError, ModuleNotFoundError):
     SERIAL_OK = False
@@ -50,6 +62,7 @@ try:
     )
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
+
     REPORTLAB_OK = True
 except Exception:
     REPORTLAB_OK = False
@@ -64,6 +77,7 @@ from signal_analysis import (
     compute_psd, integrate_band_power, extract_lambda_signal, sliding_window_power, build_conclusions
 )
 from plotting import make_raw_figure, make_psd_figure, make_lambda_figure, make_bars_figure
+
 
 # ---------------------------
 # Scrollable helpers
@@ -106,6 +120,7 @@ class ScrollablePlotArea(ttk.Frame):
         for child in list(self.inner.winfo_children()):
             child.destroy()
 
+
 class ScrollableFrame(ttk.Frame):
     def __init__(self, parent, bg=None):
         super().__init__(parent)
@@ -140,6 +155,7 @@ class ScrollableFrame(ttk.Frame):
         elif event.num == 5:
             self.canvas.yview_scroll(2, "units")
 
+
 # ---------------------------
 # Serial
 # ---------------------------
@@ -150,8 +166,9 @@ class SerialConfig:
     delimiter: str = ","
     channels: int = 1
 
+
 class ArduinoSerialStreamer(threading.Thread):
-    def __init__(self, cfg: SerialConfig, out_queue: "queue.Queue[Tuple[float, float]]"):
+    def __init__(self, cfg: SerialConfig, out_queue: "queue.Queue[tuple[Any, Any]]"):
         super().__init__(daemon=True)
         self.cfg = cfg
         self.q = out_queue
@@ -169,37 +186,59 @@ class ArduinoSerialStreamer(threading.Thread):
         self.ser.reset_input_buffer()
         self.t0 = time.time()
 
+    def close_now(self):
+        """Принудительно закрыть Serial (для Stop)."""
+        try:
+            if self.ser and getattr(self.ser, "is_open", False):
+                self.ser.close()
+        except Exception:
+            pass
+
     def stop(self):
+        """Остановить поток + попытаться сразу закрыть Serial."""
         self._stop.set()
+        self.close_now()
 
     def run(self):
         try:
             self.connect()
         except Exception as e:
-            self.q.put(("__ERROR__", float("nan")))
-            self.q.put((0.0, str(e)))
+            self.q.put(("__ERROR__", str(e)))
             return
 
         try:
             while not self._stop.is_set():
-                line = self.ser.readline().decode("utf-8", errors="ignore").strip()
+                try:
+                    line = self.ser.readline().decode("utf-8", errors="ignore").strip()
+                except Exception:
+                    break
                 if not line:
                     continue
-                raw = line.split(self.cfg.delimiter)[0].strip().replace(",", ".")
-                try:
-                    val = float(raw)
-                except Exception:
+
+                parts = [p.strip() for p in line.split(self.cfg.delimiter)]
+                if len(parts) < self.cfg.channels:
                     continue
-                t = time.time() - self.t0
-                self.q.put((t, val))
+
+                vals: List[float] = []
+                ok = True
+                for i in range(self.cfg.channels):
+                    token = parts[i].replace(",", ".")
+                    try:
+                        vals.append(float(token))
+                    except Exception:
+                        ok = False
+                        break
+                if not ok:
+                    continue
+
+                t = time.time() - (self.t0 or time.time())
+                self.q.put((t, vals))
         finally:
-            try:
-                if self.ser and self.ser.is_open:
-                    self.ser.close()
-            except Exception:
-                pass
+            self.close_now()
+
 
 _BaseTk = TkinterDnD.Tk if DND_OK else tk.Tk
+
 
 # ---------------------------
 # 10-20 selector
@@ -294,6 +333,7 @@ class TenTwentySelector(ttk.Frame):
                 fill=text_col, font=("SF Pro Text", 10, "bold")
             )
 
+
 # ---------------------------
 # ReportLab helpers
 # ---------------------------
@@ -322,6 +362,7 @@ def _df_to_rl_table(df: Optional[pd.DataFrame], font_name: str):
     ]))
     return tbl
 
+
 def _rl_image(path: str, max_width_cm: float = 17.0):
     img = RLImage(path)
     max_w = max_width_cm * cm
@@ -331,6 +372,7 @@ def _rl_image(path: str, max_width_cm: float = 17.0):
         img.drawHeight *= scale
     return img
 
+
 # ---------------------------
 # App
 # ---------------------------
@@ -338,8 +380,11 @@ class EEGApp(_BaseTk):
     def __init__(self):
         super().__init__()
         apply_mpl_style()
-
-        self.title("# Лямбда-ритмы ЭЭГ при разных воздействиях")
+        # --- LIVE defaults (важно: до _build_ui)
+        self.live_channels = 1
+        self.live_xs: List[List[float]] = [[]]  # список каналов
+        self.live_t: List[float] = []
+        self.title("Лямбда-ритмы ЭЭГ при разных воздействиях")
         self.geometry("1240x820")
         self.configure(bg=UI["bg"])
 
@@ -347,20 +392,20 @@ class EEGApp(_BaseTk):
         self.streamer: Optional[ArduinoSerialStreamer] = None
         self.live_t: List[float] = []
         self.live_x: List[float] = []
-        self.live_max_sec = 10.0
 
         self.loaded_files: List[str] = []
         self._last_records: Optional[List[Dict[str, Any]]] = None
         self._last_fs_user = FS_HZ_DEFAULT
 
-        self.eeg_montage = tk.StringVar(value="O1–Oz–O2 (затылочная область)")
+        self.eeg_montage = tk.StringVar(value="(не выбрано)")
         self.eeg_channel_hint = tk.StringVar(value="Авто (по CSV)")
 
         self.band_power_df: Optional[pd.DataFrame] = None
         self.lambda_time_df: Optional[pd.DataFrame] = None
         self.summary_df: Optional[pd.DataFrame] = None
         self.conclusions_text: str = ""
-
+        # выбранные электроды, по умолчанию пусто
+        self.selected_channels: list[str] = []
         self._analysis_thread: Optional[threading.Thread] = None
         self._analysis_busy = False
         self._ui_queue: "queue.Queue[Tuple[str, object]]" = queue.Queue()
@@ -368,11 +413,76 @@ class EEGApp(_BaseTk):
         self._pdf_thread: Optional[threading.Thread] = None
         self._pdf_busy = False
 
+        # ---- 10–20 electrode selection (global state) ----
+        # Selected electrodes are used across Online / Analysis / Reports.
+        # In single-channel mode this acts as a positional label for the channel.
+        self.selected_electrodes: List[str] = []
+        self.max_selected_electrodes: int = 3
+        self.stream_labels: List[str] = []
+        self._live_running = False
+        self._stream_time_offset = 0.0  # чтобы “продолжать” после Stop
+        self._last_live_draw_ts = 0.0  # FPS-лимит
         self._setup_style()
         self._build_ui()
+        # --- LIVE stream state ---
+        # LIVE: снимок подписей на момент старта + контроль “пауза/сброс”
 
+        # FPS/лаг-контроль для лайва
+        self._last_live_draw_ts: float = 0.0
+        self._live_draw_interval: float = 0.08  # ~12.5 fps
+        self._poll_max_items: int = 300  # 200–500 норм
         self.after(60, self._poll_serial_queue)
         self.after(60, self._poll_ui_queue)
+
+    # ------- shared helpers -------
+    def _reset_live_plot_lines(self, n_channels: int, labels: Optional[List[str]] = None):
+        n_channels = max(1, int(n_channels))
+        self.live_channels = n_channels
+
+        # буферы
+        self.live_t = []
+        self.live_xs = [[] for _ in range(n_channels)]
+
+        # пересоздаём линии
+        self.ax_live.cla()
+        style_axes(self.ax_live)
+        self.ax_live.set_title("Сигнал в реальном времени")
+        self.ax_live.set_xlabel("Время, с")
+        self.ax_live.set_ylabel("Амплитуда (у.е.)")
+
+        self.lines_live = []
+        for i in range(n_channels):
+            lab = (labels[i] if labels and i < len(labels) else f"CH{i + 1}")
+            (ln,) = self.ax_live.plot([], [], linewidth=1.8, label=lab)
+            self.lines_live.append(ln)
+
+        self.ax_live.legend(fontsize=9, loc="upper right")
+
+        # ✅ ВАЖНО: canvas может ещё не существовать при построении UI
+        if hasattr(self, "canvas_live") and self.canvas_live is not None:
+            self.canvas_live.draw_idle()
+
+    def _selected_electrodes_str(self) -> str:
+        """Строка с выбранными электродами (в порядке выбора)."""
+        return ", ".join(self.selected_electrodes) if self.selected_electrodes else "(не выбрано)"
+
+    def _sync_electrode_selection_ui(self) -> None:
+        """Обновить все элементы UI, где отображается выбор электродов."""
+        # Analysis tab label (если создан)
+        if hasattr(self, "_analysis_elec_var"):
+            try:
+                self._analysis_elec_var.set(self._selected_electrodes_str())
+            except Exception:
+                pass
+        # Live tab ylabel (если создан)
+        if hasattr(self, "ax_live"):
+            try:
+                s = self._selected_electrodes_str()
+                self.ax_live.set_ylabel(f"A0 / {s}" if s != "(не выбрано)" else "A0 (у.е.)")
+                if hasattr(self, "canvas_live"):
+                    self.canvas_live.draw_idle()
+            except Exception:
+                pass
 
     # ------- style -------
     def _setup_style(self):
@@ -456,20 +566,158 @@ class EEGApp(_BaseTk):
 
     # ------- UI -------
     def _build_ui(self):
+        # Top bar (right-aligned help button)
+        topbar = ttk.Frame(self)
+        topbar.pack(fill="x", padx=12, pady=(12, 0))
+
+        ttk.Button(topbar, text="Инструкция", command=self._show_help_dialog).pack(side="right")
+
         nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=12, pady=12)
+        nb.pack(fill="both", expand=True, padx=12, pady=(8, 12))
 
         self.tab_live = ttk.Frame(nb)
+        self.tab_1020 = ttk.Frame(nb)
         self.tab_files = ttk.Frame(nb)
         self.tab_analysis = ttk.Frame(nb)
 
         nb.add(self.tab_live, text="Онлайн")
+        nb.add(self.tab_1020, text="Система 10–20")
         nb.add(self.tab_files, text="Файлы")
         nb.add(self.tab_analysis, text="Анализ ЛР5")
 
         self._build_live_tab()
+        self._build_1020_tab()
         self._build_files_tab()
         self._build_analysis_tab()
+        self._sync_electrode_selection_ui()
+
+    # ---------------- help ----------------
+    def _show_help_dialog(self) -> None:
+        """Окно-подсказка: как пользоваться приложением."""
+        win = tk.Toplevel(self)
+        win.title("Инструкция")
+        win.transient(self)
+        win.grab_set()
+
+        # --- sizing ---
+        win.geometry("720x560")
+        win.configure(bg=UI["bg"])
+
+        # --- header (nice looking) ---
+        header = tk.Frame(win, bg=UI["panel"], padx=16, pady=14)
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text="Инструкция",
+            bg=UI["panel"],
+            fg=UI["text"],
+            font=FONT_TITLE,
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text="Коротко: подключись → выбери электроды → загрузи файл → запусти анализ → сохрани PDF",
+            bg=UI["panel"],
+            fg=UI["muted"],
+            font=FONT_MAIN,
+        ).pack(anchor="w", pady=(6, 0))
+
+        container = tk.Frame(win, bg=UI["bg"], padx=16, pady=14)
+        container.pack(fill="both", expand=True)
+
+        # --- content card ---
+        card = tk.Frame(container, bg=UI["panel2"], highlightthickness=1, highlightbackground=UI["border"])
+        card.pack(fill="both", expand=True)
+
+        # Scrollbar + Text with tags
+        yscroll = ttk.Scrollbar(card, orient="vertical")
+        yscroll.pack(side="right", fill="y")
+
+        txt = tk.Text(
+            card,
+            wrap="word",
+            yscrollcommand=yscroll.set,
+            bg=UI["panel2"],
+            fg=UI["text"],
+            insertbackground=UI["text"],
+            borderwidth=0,
+            highlightthickness=0,
+            padx=14,
+            pady=12,
+            font=FONT_MAIN,
+        )
+        txt.pack(side="left", fill="both", expand=True)
+        yscroll.config(command=txt.yview)
+
+        # Tags (simple & pretty)
+        txt.tag_configure("h", font=FONT_H2, foreground=UI["text"], spacing3=8)
+        txt.tag_configure("sub", font=FONT_MAIN, foreground=UI["muted"], spacing3=6)
+        txt.tag_configure("stepn", font=FONT_MAIN, foreground=UI["accent"], spacing1=2)
+        txt.tag_configure("step", font=FONT_MAIN, foreground=UI["text"], lmargin1=24, lmargin2=24, spacing1=2)
+        txt.tag_configure("bullet", font=FONT_MAIN, foreground=UI["text"], lmargin1=24, lmargin2=24, spacing1=2)
+        txt.tag_configure("note", font=FONT_MAIN, foreground=UI["muted"], lmargin1=24, lmargin2=24, spacing1=2)
+        txt.tag_configure("pill", font=FONT_SMALL, foreground=UI["muted"],
+                          background=_blend(UI["panel2"], UI["hover"], 0.45))
+
+        # Build pretty content
+        def add(line: str, tag: str | Tuple[str, ...] | None = None):
+            if tag is None:
+                txt.insert("end", line)
+            else:
+                txt.insert("end", line, tag)
+
+        add("Шаги работы\n", "h")
+        steps = [
+            "Онлайн — подключитесь к Arduino по COM‑порту и убедитесь, что сигнал идёт.",
+            "Система 10–20 — выберите до 3 электродов (это позиции на голове).",
+            "Файлы — загрузите CSV (проводник или drag&drop).",
+            "Анализ — запустите расчёты (лямбда‑ритм/PSD) и посмотрите результаты.",
+            "Экспорт PDF — сохраните отчёт.",
+        ]
+        for i, s in enumerate(steps, 1):
+            add(f"{i}) ", "stepn")
+            add(s + "\n", "step")
+        add("\n")
+
+        add("Коротко про термины\n", "h")
+        add("• ", "bullet");
+        add("Канал", ("bullet", "pill"));
+        add(" — один столбец сигнала в CSV или один поток чисел в онлайн‑режиме.\n", "bullet")
+        add("• ", "bullet");
+        add("Электрод", ("bullet", "pill"));
+        add(" — точка на голове по системе 10–20 (O1, Oz, O2 и т.д.).\n", "bullet")
+        add("\n")
+
+        add("Если файл/онлайн содержит только 1 канал\n", "h")
+        add("• Можно выбрать только 1 электрод — это будет метка для этого канала.\n", "note")
+        add("• Если выбрано больше — лишние электроды игнорируются.\n", "note")
+        add("\n")
+
+        add("Подсказка\n", "h")
+        add("Для лямбда‑ритма обычно выбирают затылочные электроды: O1 / Oz / O2.\n", "sub")
+
+        txt.config(state="disabled")
+
+        # --- footer ---
+        footer = tk.Frame(container, bg=UI["bg"], pady=10)
+        footer.pack(fill="x")
+        ttk.Button(footer, text="Закрыть", command=win.destroy).pack(side="right")
+
+    # ---------------- 10-20 tab ----------------
+    def _build_1020_tab(self) -> None:
+        """Пока каркас вкладки. Схему 10–20 подключим следующим шагом."""
+        wrap = ttk.Frame(self.tab_1020, padding=14)
+        wrap.pack(fill="both", expand=True)
+
+        ttk.Label(wrap, text="Система 10–20", style="H2.TLabel").pack(anchor="w")
+        ttk.Label(
+            wrap,
+            text=(
+                "Здесь будет визуальная схема головы и выбор электродов (до 3).\n"
+                "Выбранные электроды будут применяться ко всему проекту."
+            ),
+            style="Muted.TLabel",
+            justify="left",
+        ).pack(anchor="w", pady=(6, 0))
 
     # ---------------- live ----------------
     def _build_live_tab(self):
@@ -484,30 +732,40 @@ class EEGApp(_BaseTk):
         card.pack(fill="x")
 
         ttk.Label(card, text="Порт:", style="Muted.TLabel").pack(side="left", padx=(0, 6))
-        self.cbo_port = ttk.Combobox(card, width=34, state="normal")
-        self.cbo_port.pack(side="left", padx=(0, 10))
+        self.cbo_port = ttk.Combobox(card, width=28, state="normal")
+        self.cbo_port.pack(side="left", padx=(0, 16))
 
-        self.btn_ports = ttk.Button(card, text="Обновить", command=self.refresh_ports, style="Ghost.TButton")
-        self.btn_ports.pack(side="left", padx=(0, 16))
-
-        ttk.Label(card, text="Скорость:", style="Muted.TLabel").pack(side="left", padx=(0, 6))
+        # Baud оставим как "расширенный параметр": иногда Arduino реально прошит на другой baud.
+        ttk.Label(card, text="Скорость (baud):", style="Muted.TLabel").pack(side="left", padx=(0, 6))
         self.ent_baud = ttk.Entry(card, width=10)
         self.ent_baud.insert(0, "115200")
         self.ent_baud.pack(side="left", padx=(0, 16))
 
-        ttk.Label(card, text="Окно (с):", style="Muted.TLabel").pack(side="left", padx=(0, 6))
-        self.ent_win = ttk.Entry(card, width=8)
-        self.ent_win.insert(0, "10")
-        self.ent_win.pack(side="left", padx=(0, 16))
-
         self.btn_start = ttk.Button(card, text="▶ Старт", command=self.start_stream, style="Primary.TButton")
         self.btn_start.pack(side="left", padx=(0, 8))
 
-        self.btn_stop = ttk.Button(card, text="■ Стоп", command=self.stop_stream, state="disabled", style="Danger.TButton")
+        self.btn_stop = ttk.Button(card, text="⏸ Стоп", command=self.stop_stream, state="disabled",
+                                   style="Danger.TButton")
         self.btn_stop.pack(side="left", padx=(0, 8))
 
-        self.btn_save = ttk.Button(card, text="💾 Сохранить CSV", command=self.save_live_csv, state="disabled", style="Ghost.TButton")
-        self.btn_save.pack(side="left")
+        # Сброс — отдельно (очищает данные/график/очередь)
+        self.btn_reset_live = ttk.Button(card, text="↺ Сброс", command=self.reset_live, style="Ghost.TButton")
+        self.btn_reset_live.pack(side="left", padx=(0, 8))
+
+        # Сохранение текущей записи в CSV
+        self.btn_save = ttk.Button(card, text="💾 Сохранить CSV", command=self.save_live_csv,
+                                   state="disabled", style="Ghost.TButton")
+        self.btn_save.pack(side="left", padx=(0, 8))
+
+        # Новая кнопка: записали -> добавили в список "Файлы"
+        self.btn_add_to_files = ttk.Button(
+            card,
+            text="➕ Добавить в анализ",
+            command=self.add_live_to_files,
+            state="disabled",
+            style="Ghost.TButton"
+        )
+        self.btn_add_to_files.pack(side="left")
 
         plot_card = ttk.Frame(root, padding=14, style="Card.TFrame")
         plot_card.pack(fill="both", expand=True, pady=(12, 0))
@@ -516,118 +774,285 @@ class EEGApp(_BaseTk):
         self.fig_live = Figure(figsize=(10, 4), dpi=110)
         self.ax_live = self.fig_live.add_subplot(111)
         style_axes(self.ax_live)
-        self.ax_live.set_title("Сигнал в реальном времени")
-        self.ax_live.set_ylabel("A0 (у.е.)")
-        self.line_live, = self.ax_live.plot([], [], linewidth=2.0)
 
         self.canvas_live = FigureCanvasTkAgg(self.fig_live, master=plot_card)
         self.canvas_live.get_tk_widget().pack(fill="both", expand=True)
 
+        # ВАЖНО: окно отображения фиксируем в коде, UI поля нет
+        self.live_max_sec = 10.0
+
+        self._reset_live_plot_lines(1, ["A0"])
+        self.canvas_live.draw_idle()
+
         self.lbl_live_status = ttk.Label(root, text="Статус: не запущено", style="Muted.TLabel")
         self.lbl_live_status.pack(anchor="w", pady=(10, 0))
 
+        # авто-обновление портов
         self.refresh_ports(silent=True)
+        self.after(2000, self._ports_autorefresh_tick)
+
+    def _ports_autorefresh_tick(self):
+        try:
+            if not getattr(self, "_live_running", False):
+                self.refresh_ports(silent=True)
+        finally:
+            self.after(2000, self._ports_autorefresh_tick)
+
+    def _clear_serial_queue(self) -> None:
+        try:
+            while True:
+                self.serial_queue.get_nowait()
+        except queue.Empty:
+            pass
 
     def refresh_ports(self, silent: bool = False):
         ports = []
+
+        # 1) стандартный список от pyserial
         if SERIAL_OK:
             try:
                 ports = [p.device for p in serial.tools.list_ports.comports()]
             except Exception:
                 ports = []
+
+        # 2) доп. поиск по /dev (macOS)
+        try:
+            import glob
+            extra = glob.glob("/dev/tty.*") + glob.glob("/dev/cu.*") + glob.glob("/dev/ttys*") + glob.glob(
+                "/dev/tty.usb*")
+            for p in extra:
+                if p not in ports:
+                    ports.append(p)
+        except Exception:
+            pass
+
+        ports = sorted(set(ports))
         self.cbo_port["values"] = ports
+
         if ports and not self.cbo_port.get():
             self.cbo_port.set(ports[0])
+
         if not silent:
             self.lbl_live_status.config(text="Статус: список портов обновлён")
 
     def start_stream(self):
+        if getattr(self, "_live_running", False):
+            return
+
         if not SERIAL_OK:
             messagebox.showerror("Serial", "pyserial не установлен.\n\npip install pyserial")
             return
 
+        # фиксируем электроды на момент старта
+        labels = list(getattr(self, "selected_electrodes", [])) or ["A0"]
+        self.stream_labels = labels[:]  # snapshot
+        n_channels = len(self.stream_labels)
+
         port = (self.cbo_port.get() or "").strip()
-        try:
-            baud = int(self.ent_baud.get().strip())
-        except Exception:
-            messagebox.showerror("Ошибка", "Неверная скорость (baudrate).")
+        if not port:
+            messagebox.showerror("Ошибка", "Выбери порт.")
             return
 
         try:
-            self.live_max_sec = float(self.ent_win.get().strip())
+            baud = int(self.ent_baud.get().strip())
         except Exception:
-            self.live_max_sec = 10.0
+            messagebox.showerror("Ошибка", "Неверная скорость (baud).")
+            return
 
-        self.live_t.clear()
-        self.live_x.clear()
+        # если это первый старт или после reset -> пересоздаем линии/буферы
+        if not getattr(self, "live_t", None):
+            self._reset_live_plot_lines(n_channels, self.stream_labels)
+            self._stream_time_offset = 0.0
+        else:
+            # продолжение после Stop
+            self._stream_time_offset = float(self.live_t[-1]) if self.live_t else 0.0
 
-        cfg = SerialConfig(port=port, baudrate=baud, delimiter=",", channels=1)
+            # если кол-во каналов изменилось — лучше принудительно reset
+            if getattr(self, "live_channels", 1) != n_channels:
+                self.reset_live()
+                self._reset_live_plot_lines(n_channels, self.stream_labels)
+                self._stream_time_offset = 0.0
+
+        self._drain_serial_queue()
+
+        cfg = SerialConfig(port=port, baudrate=baud, delimiter=",", channels=n_channels)
         self.streamer = ArduinoSerialStreamer(cfg, self.serial_queue)
         self.streamer.start()
 
+        self._live_running = True
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
-        self.btn_save.config(state="normal")
-        self.lbl_live_status.config(text=f"Статус: подключение к {port} @ {baud}")
+
+        # сохранить можно и во время паузы, но активируем когда есть данные
+        self.btn_save.config(state=("normal" if self.live_t else "disabled"))
+        self.btn_add_to_files.config(state=("normal" if self.live_t else "disabled"))
+
+        self.lbl_live_status.config(text=f"Статус: поток | каналы: {', '.join(self.stream_labels)}")
 
     def stop_stream(self):
         if self.streamer:
-            self.streamer.stop()
+            try:
+                self.streamer.stop()  # флаг + попытка закрыть serial
+                self.streamer.close_now()  # на всякий
+            except Exception:
+                pass
             self.streamer = None
+
+        self._live_running = False
+
+        # ✅ важно: после остановки чистим очередь, чтобы не доедало старые данные
+        self._drain_serial_queue()
+
         self.btn_start.config(state="normal")
         self.btn_stop.config(state="disabled")
-        self.lbl_live_status.config(text="Статус: остановлено")
+
+        # Save и "в файлы" доступны, если есть данные
+        has_data = bool(self.live_t)
+        self.btn_save.config(state="normal" if has_data else "disabled")
+        self.btn_add_to_files.config(state="normal" if has_data else "disabled")
+        self.lbl_live_status.config(text="Статус: остановлено (пауза)")
+
+    def reset_live(self):
+        # если идёт стрим — сначала остановим
+        if getattr(self, "_live_running", False):
+            self.stop_stream()
+
+        self._drain_serial_queue()
+
+        self.live_t = []
+        self.live_xs = [[] for _ in range(1)]
+        self.stream_labels = []
+        self._stream_time_offset = 0.0
+        self._last_live_draw_ts = 0.0
+        self._reset_live_plot_lines(1, ["A0"])
+        self.btn_save.config(state="disabled")
+        self.btn_add_to_files.config(state="disabled")
+        self.lbl_live_status.config(text="Статус: сброшено ✅")
+
+    def _drain_serial_queue(self) -> None:
+        try:
+            while True:
+                self.serial_queue.get_nowait()
+        except queue.Empty:
+            pass
 
     def _poll_serial_queue(self):
-        updated = False
-        while True:
+        max_items = 300  # 200–500 норм
+        got_any = False
+        count = 0
+
+        while count < max_items:
             try:
                 item = self.serial_queue.get_nowait()
             except queue.Empty:
                 break
 
+            count += 1
+
             if isinstance(item[0], str) and item[0] == "__ERROR__":
-                try:
-                    _, msg = self.serial_queue.get_nowait()
-                    messagebox.showerror("Ошибка Serial", f"Не удалось подключиться:\n{msg}")
-                except Exception:
-                    messagebox.showerror("Ошибка Serial", "Не удалось подключиться.")
+                messagebox.showerror("Ошибка Serial", f"Не удалось подключиться:\n{item[1]}")
                 self.stop_stream()
                 break
 
-            t, x = item
-            if not isinstance(t, (int, float)) or not isinstance(x, (int, float)):
+            t, vals = item
+            if not isinstance(t, (int, float)) or not isinstance(vals, list):
                 continue
 
-            self.live_t.append(float(t))
-            self.live_x.append(float(x))
-            updated = True
+            t = float(t) + float(getattr(self, "_stream_time_offset", 0.0))
+            self.live_t.append(t)
 
-        if updated:
-            self._update_live_plot()
+            # гарантируем нужное число каналов
+            need = max(1, len(getattr(self, "stream_labels", [])) or 1)
+            if len(self.live_xs) != need:
+                self.live_xs = [[] for _ in range(need)]
+
+            for i in range(min(need, len(vals))):
+                self.live_xs[i].append(float(vals[i]))
+
+            got_any = True
+
+        # ограничение FPS (10–15 кадров/сек)
+        if got_any:
+            now = time.time()
+            if (now - getattr(self, "_last_live_draw_ts", 0.0)) >= 0.08:
+                self._last_live_draw_ts = now
+                self._update_live_plot()
 
         self.after(60, self._poll_serial_queue)
 
     def _update_live_plot(self):
-        if not self.live_t:
+        if len(self.live_t) < 2:
             return
 
-        t = np.asarray(self.live_t)
-        x = np.asarray(self.live_x)
+        t = np.asarray(self.live_t, dtype=float)
 
-        tmax = t[-1]
-        m = t >= max(0.0, tmax - self.live_max_sec)
-        t2, x2 = t[m], x[m]
+        ymin, ymax = None, None
+        for i, ln in enumerate(self.lines_live):
+            x = np.asarray(self.live_xs[i], dtype=float)
+            ln.set_data(t, x)
 
-        self.line_live.set_data(t2, x2)
-        self.ax_live.set_xlim(float(t2[0]), float(t2[-1]) if len(t2) > 1 else float(t2[0]) + 1e-3)
+            if len(x):
+                lo, hi = float(np.min(x)), float(np.max(x))
+                ymin = lo if ymin is None else min(ymin, lo)
+                ymax = hi if ymax is None else max(ymax, hi)
 
-        ymin, ymax = float(np.min(x2)), float(np.max(x2))
-        pad = 0.05 * (ymax - ymin) if ymax > ymin else 0.5
-        self.ax_live.set_ylim(ymin - pad, ymax + pad)
+        self.ax_live.set_xlim(float(t[0]), float(t[-1]))
+        if ymin is not None and ymax is not None:
+            pad = 0.05 * (ymax - ymin) if ymax > ymin else 0.5
+            self.ax_live.set_ylim(ymin - pad, ymax + pad)
 
         self.canvas_live.draw_idle()
-        self.lbl_live_status.config(text=f"Статус: поток | точек: {len(self.live_t)} | t={t[-1]:.2f}с")
+
+    def add_live_to_files(self):
+        """Совместимость: кнопка вызывает это имя."""
+        return self.add_live_record_to_files()
+
+    def add_live_record_to_files(self):
+        if not self.live_t:
+            messagebox.showwarning("Нет данных", "Сначала запиши сигнал (Старт → Стоп).")
+            return
+
+        # лимит: максимум 6 лайв-записей в списке
+        live_count = sum(1 for p in self.loaded_files if os.path.basename(p).startswith("eeg_live_"))
+        if live_count >= 6:
+            messagebox.showinfo("Лимит", "Можно добавить максимум 6 записей из онлайн-режима.")
+            return
+
+        # сохраняем в temp, чтобы автоматически появилось в “Файлы”
+        tmpdir = os.path.join(tempfile.gettempdir(), "eeg_app_live_records")
+        os.makedirs(tmpdir, exist_ok=True)
+
+        fname = f"eeg_live_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        path = os.path.join(tmpdir, fname)
+
+        labels = self.stream_labels if self.stream_labels else [f"CH{i + 1}" for i in range(len(self.live_xs) or 1)]
+
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["time_s"] + labels)
+            n = len(self.live_t)
+            for k in range(n):
+                row = [f"{self.live_t[k]:.6f}"]
+                for i in range(len(labels)):
+                    row.append(f"{self.live_xs[i][k]:.6f}" if k < len(self.live_xs[i]) else "")
+                w.writerow(row)
+
+        # добавить в список файлов UI
+        path = os.path.abspath(path)
+        if path not in self.loaded_files:
+            self.loaded_files.append(path)
+            if hasattr(self, "lst_files"):
+                self.lst_files.insert("end", path)
+            if hasattr(self, "_refresh_files_count"):
+                self._refresh_files_count()
+
+        messagebox.showinfo("Добавлено", "Запись добавлена во вкладку «Файлы» и готова к анализу.")
+
+    def add_live_to_files(self):
+        """Кнопка 'Добавить в анализ' на вкладке Онлайн.
+        Это алиас, чтобы не ломать старые имена после Ctrl+Z.
+        """
+        return self.add_live_record_to_files()
 
     def save_live_csv(self):
         if not self.live_t:
@@ -643,11 +1068,316 @@ class EEGApp(_BaseTk):
 
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["время_с", "a0"])
-            for t, x in zip(self.live_t, self.live_x):
-                w.writerow([f"{t:.6f}", f"{x:.6f}"])
+            w.writerow(["время_с"] + (self.selected_electrodes if self.selected_electrodes else [f"CH{i + 1}" for i in
+                                                                                                 range(
+                                                                                                     self.live_channels)]))
+
+            n = len(self.live_t)
+            for k in range(n):
+                row = [f"{self.live_t[k]:.6f}"]
+                for i in range(self.live_channels):
+                    row.append(f"{self.live_xs[i][k]:.6f}" if k < len(self.live_xs[i]) else "")
+                w.writerow(row)
 
         messagebox.showinfo("Сохранено", f"CSV сохранён:\n{path}")
+
+    # ---------------- 10–20 ----------------
+    def _build_1020_tab(self):
+        if self._live_running:
+            messagebox.showwarning("Нельзя во время стрима", "Остановите стрим (Стоп), затем меняйте электроды.")
+            return
+        root = ttk.Frame(self.tab_1020)
+        root.pack(fill="both", expand=True)
+
+        # Header
+        head = ttk.Frame(root)
+        head.pack(fill="x", padx=12, pady=(12, 6))
+
+        ttk.Label(
+            head,
+            text="Система 10–20: выбор электродов",
+            font=FONT_H2,
+        ).pack(side="left")
+
+        ttk.Label(
+            head,
+            text="(максимум 3 электрода)",
+            foreground=UI["muted"],
+            font=FONT_SMALL,
+        ).pack(side="left", padx=(10, 0))
+
+        body = ttk.Frame(root)
+        body.pack(fill="both", expand=True, padx=12, pady=10)
+
+        # Left: canvas (scalp view)
+        left = tk.Frame(body, bg=UI["panel2"], highlightthickness=1, highlightbackground=UI["border"])
+        left.pack(side="left", fill="both", expand=True)
+
+        # Right: controls
+        right = ttk.Frame(body)
+        right.pack(side="right", fill="y", padx=(12, 0))
+
+        if not MNE_OK:
+            ttk.Label(
+                left,
+                text="Библиотека MNE не установлена.\nСхема 10–20 недоступна.",
+                justify="center",
+            ).pack(expand=True)
+            return
+
+        # Canvas
+        self._1020_canvas = tk.Canvas(
+            left,
+            bg=UI["panel2"],
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self._1020_canvas.pack(fill="both", expand=True)
+
+        # Selected label
+        self._1020_selected_var = tk.StringVar(value="Выбрано: (ничего)")
+        ttk.Label(
+            root,
+            textvariable=self._1020_selected_var,
+            foreground=UI["muted"],
+            font=FONT_MAIN,
+        ).pack(anchor="w", padx=14, pady=(0, 12))
+
+        # Load montage positions
+        montage = mne.channels.make_standard_montage("standard_1020")
+        ch_pos = montage.get_positions()["ch_pos"]  # dict: name -> (x,y,z)
+        # Keep only standard EEG channels (exclude fiducials)
+        self._1020_positions = {k: (float(v[0]), float(v[1])) for k, v in ch_pos.items() if k and k[0].isalpha()}
+
+        # Visual settings
+        self._1020_radius = 10  # базовое; в draw пересчитаем под размер
+        self._1020_hit_radius = 14  # базовое; в draw пересчитаем под размер
+        self._1020_items = {}  # name -> (oval_id, text_id)
+
+        # Internal selection list (preserve order)
+        self._1020_selected: List[str] = list(self.selected_electrodes)
+
+        # Показываем подписи не всегда (иначе они накладываются при маленьком окне).
+        # В маленьком масштабе показываем подписи только для "основных" точек и выбранных электродов.
+        self._1020_major_labels = {
+            "Fp1", "Fp2", "F7", "F3", "Fz", "F4", "F8",
+            "T7", "C3", "Cz", "C4", "T8",
+            "P7", "P3", "Pz", "P4", "P8",
+            "O1", "Oz", "O2",
+        }
+
+        def _update_selected_text():
+            if self._1020_selected:
+                self._1020_selected_var.set("Выбрано: " + ", ".join(self._1020_selected))
+            else:
+                self._1020_selected_var.set("Выбрано: (ничего)")
+
+        def _project_to_canvas(x: float, y: float, w: int, h: int):
+            pad = max(30, int(0.08 * min(w, h)))
+            size = min(w, h) - 2 * pad
+            size = max(size, 10)
+            cx, cy = w / 2, h / 2
+
+            # масштаб: нормализуем по диапазону координат (так устойчивее, чем радиус)
+            xs = [p[0] for p in self._1020_positions.values()]
+            ys = [p[1] for p in self._1020_positions.values()]
+            rx = max(abs(min(xs)), abs(max(xs)), 1e-6)
+            ry = max(abs(min(ys)), abs(max(ys)), 1e-6)
+            r = max(rx, ry, 1e-6)
+            nx = x / r
+            ny = y / r
+
+            # проекция: +x вправо, +y вверх (но canvas вниз)
+            px = cx + (nx * (size / 2))
+            py = cy - (ny * (size / 2))
+            return px, py
+
+        def _draw():
+            c = self._1020_canvas
+            c.delete("all")
+            self._1020_items.clear()
+
+            w = c.winfo_width()
+            h = c.winfo_height()
+            if w < 60 or h < 60:
+                return
+
+            # Draw head outline
+            pad = max(28, int(0.075 * min(w, h)))
+            # адаптация размеров под масштаб окна
+            base = min(w, h)
+            self._1020_radius = max(6, int(base * 0.012))
+            self._1020_hit_radius = max(self._1020_radius + 4, int(base * 0.018))
+
+            c.create_oval(
+                pad, pad, w - pad, h - pad,
+                outline=UI["border"],
+                width=2
+            )
+            # Nose (simple)
+            cx = w / 2
+            top = pad
+            c.create_polygon(
+                cx - 12, top + 2,
+                cx + 12, top + 2,
+                cx, top - 14,
+                outline=UI["border"],
+                fill=UI["panel2"],
+                width=2
+            )
+
+            # Ears (simple)
+            c.create_oval(pad - 10, h / 2 - 28, pad + 18, h / 2 + 28, outline=UI["border"], width=2, fill=UI["panel2"])
+            c.create_oval(w - pad - 18, h / 2 - 28, w - pad + 10, h / 2 + 28, outline=UI["border"], width=2,
+                          fill=UI["panel2"])
+
+            # Electrodes
+            for name, (x, y) in self._1020_positions.items():
+                px, py = _project_to_canvas(x, y, w, h)
+                r = self._1020_radius
+
+                selected = name in self._1020_selected
+                fill = UI["accent"] if selected else UI["panel"]
+                outline = UI["accent"] if selected else UI["border"]
+
+                oid = c.create_oval(px - r, py - r, px + r, py + r, fill=fill, outline=outline, width=2)
+                # подписи рисуем не для всех, иначе всё слипается на маленьком окне
+                show_label = (min(w, h) >= 820) or selected or (name in self._1020_major_labels)
+                tid = None
+                if show_label:
+                    # динамический размер шрифта
+                    fsz = 9 if min(w, h) >= 820 else 8
+                    tid = c.create_text(px, py + r + 10, text=name, fill=UI["muted"], font=("SF Pro Text", fsz))
+
+                self._1020_items[name] = (oid, tid)
+
+            _update_selected_text()
+
+        def _nearest_electrode(xc: float, yc: float):
+            c = self._1020_canvas
+            w = c.winfo_width()
+            h = c.winfo_height()
+            best = None
+            best_d2 = 10 ** 12
+            for name, (x, y) in self._1020_positions.items():
+                px, py = _project_to_canvas(x, y, w, h)
+                d2 = (px - xc) ** 2 + (py - yc) ** 2
+                if d2 < best_d2:
+                    best_d2 = d2
+                    best = name
+            if best is None:
+                return None
+            if best_d2 <= (self._1020_hit_radius ** 2):
+                return best
+            return None
+
+        def _toggle(name: str):
+            if name in self._1020_selected:
+                self._1020_selected.remove(name)
+            else:
+                if len(self._1020_selected) >= self.max_selected_electrodes:
+                    messagebox.showinfo(
+                        "Ограничение выбора",
+                        f"Можно выбрать не более {self.max_selected_electrodes} электродов."
+                    )
+                    return
+                self._1020_selected.append(name)
+            _draw()
+
+        def _on_click(evt):
+            name = _nearest_electrode(evt.x, evt.y)
+            if name:
+                _toggle(name)
+
+        self._1020_canvas.bind("<Button-1>", _on_click)
+        self._1020_canvas.bind("<Configure>", lambda _e: _draw())
+
+        # Controls
+        ttk.Label(
+            right,
+            text="Управление выбором",
+            font=FONT_H2,
+        ).pack(anchor="w", pady=(0, 8))
+        # --- РЕКОМЕНДАЦИИ ---
+        rec_card = ttk.Frame(right, padding=10, style="Card2.TFrame")
+        rec_card.pack(fill="x", pady=(0, 12))
+
+        ttk.Label(rec_card, text="Рекомендации", style="H2.TLabel").pack(anchor="w")
+
+        ttk.Label(
+            rec_card,
+            text=(
+                "• Для λ-ритма чаще используют затылочные зоны:\n"
+                "  O1, Oz, O2 (самый частый вариант)\n"
+                "• Допустимо: теменно-затылочные:\n"
+                "  Pz + Oz/O2 (если нет чисто затылочных)\n"
+                "• Для сравнения можно взять лобные:\n"
+                "  Fp1/Fp2/Fz (как контроль)\n\n"
+                "Совет: выбери 1–3 электрода и не меняй их во время записи."
+            ),
+            style="Muted.TLabel",
+            justify="left",
+        ).pack(anchor="w")
+
+        def _clear():
+            self._1020_selected.clear()
+            _draw()
+
+        # Наборы “рекомендуемых” электродов (можно расширять)
+        presets: List[Tuple[str, List[str]]] = [
+            ("Затылочные (λ): O1, Oz, O2", ["O1", "Oz", "O2"]),
+            ("Теменно‑затылочные: Pz, Oz, O2", ["Pz", "Oz", "O2"]),
+            ("Теменные: P3, Pz, P4", ["P3", "Pz", "P4"]),
+            ("Лобные: Fp1, Fp2, Fz", ["Fp1", "Fp2", "Fz"]),
+            ("Центральные: C3, Cz, C4", ["C3", "Cz", "C4"]),
+        ]
+
+        self._1020_preset_var = tk.StringVar(value=presets[0][0])
+
+        ttk.Label(right, text="Набор электродов:", style="Muted.TLabel").pack(anchor="w", pady=(6, 4))
+        cbo = ttk.Combobox(right, state="readonly", textvariable=self._1020_preset_var,
+                           values=[p[0] for p in presets], width=28)
+        cbo.pack(fill="x", pady=(0, 8))
+
+        def _apply_preset():
+            label = self._1020_preset_var.get()
+            rec = None
+            for nm, arr in presets:
+                if nm == label:
+                    rec = arr
+                    break
+            if not rec:
+                return
+            self._1020_selected.clear()
+            for ch in rec:
+                if ch in self._1020_positions and len(self._1020_selected) < self.max_selected_electrodes:
+                    self._1020_selected.append(ch)
+            _draw()
+
+        def _apply():
+            was_running = (self.streamer is not None)
+
+            # ✅ если стрим идёт — перезапускаем, чтобы нельзя было менять “на лету”
+            if was_running:
+                self.stop_stream()
+
+            self.selected_electrodes = list(self._1020_selected)
+            self.eeg_montage.set(self._selected_electrodes_str())
+            self._sync_electrode_selection_ui()
+            _update_selected_text()
+
+            messagebox.showinfo("Применено", "Выбор электродов сохранён и будет использован в других вкладках.")
+
+            if was_running:
+                self.start_stream()
+
+        ttk.Button(right, text="Применить набор", command=_apply_preset).pack(fill="x", pady=(0, 8))
+        ttk.Button(right, text="Очистить", command=_clear).pack(fill="x", pady=(0, 8))
+        ttk.Separator(right).pack(fill="x", pady=10)
+        ttk.Button(right, text="Применить", command=_apply).pack(fill="x")
+
+        # Initial draw
+        self.after(50, _draw)
 
     # ---------------- files ----------------
     def _build_files_tab(self):
@@ -671,7 +1401,8 @@ class EEGApp(_BaseTk):
         self.btn_add_files = ttk.Button(top, text="➕ Добавить CSV", command=self.add_csv_files, style="Primary.TButton")
         self.btn_add_files.pack(side="left")
 
-        self.btn_remove_file = ttk.Button(top, text="🗑 Удалить", command=self.remove_selected_file, style="Ghost.TButton")
+        self.btn_remove_file = ttk.Button(top, text="🗑 Удалить", command=self.remove_selected_file,
+                                          style="Ghost.TButton")
         self.btn_remove_file.pack(side="left", padx=8)
 
         self.btn_clear_files = ttk.Button(top, text="Очистить", command=self.clear_file_list, style="Danger.TButton")
@@ -730,12 +1461,16 @@ class EEGApp(_BaseTk):
         out, buf, in_brace = [], "", False
         for ch in data:
             if ch == "{":
-                in_brace = True; buf = ""
+                in_brace = True;
+                buf = ""
             elif ch == "}":
-                in_brace = False; out.append(buf); buf = ""
+                in_brace = False;
+                out.append(buf);
+                buf = ""
             elif ch == " " and not in_brace:
                 if buf:
-                    out.append(buf); buf = ""
+                    out.append(buf);
+                    buf = ""
             else:
                 buf += ch
         if buf:
@@ -794,22 +1529,15 @@ class EEGApp(_BaseTk):
         self.ent_fs.insert(0, "250")
         self.ent_fs.pack(side="left", padx=(0, 14))
 
-        ttk.Label(controls, text="Расположение электродов:", style="Muted.TLabel").pack(side="left", padx=(8, 8))
-        self.cbo_montage = ttk.Combobox(
-            controls, textvariable=self.eeg_montage, state="readonly", width=30,
-            values=[
-                "O1–Oz–O2 (затылочная область)",
-                "Pz (теменно-затылочная область)",
-                "T5/T6 (височно-затылочная область)",
-                "Другое (указать в выводах)",
-            ],
-        )
-        self.cbo_montage.pack(side="left", padx=(0, 14))
+        ttk.Label(controls, text="Выбранные электроды:", style="Muted.TLabel").pack(side="left", padx=(8, 8))
+        self._analysis_elec_var = tk.StringVar(value=self._selected_electrodes_str())
+        ttk.Label(controls, textvariable=self._analysis_elec_var, style="Muted.TLabel").pack(side="left", padx=(0, 14))
 
         self.btn_run = ttk.Button(controls, text="▶ Запустить анализ", command=self.run_lab5, style="Primary.TButton")
         self.btn_run.pack(side="left", padx=(0, 8))
 
-        self.btn_report = ttk.Button(controls, text="📄 Экспорт PDF", command=self.export_report_pdf, style="Ghost.TButton")
+        self.btn_report = ttk.Button(controls, text="📄 Экспорт PDF", command=self.export_report_pdf,
+                                     style="Ghost.TButton")
         self.btn_report.pack(side="left", padx=(0, 12))
 
         self.pb = ttk.Progressbar(controls, mode="indeterminate", length=180)
@@ -820,7 +1548,8 @@ class EEGApp(_BaseTk):
         body = ttk.PanedWindow(root, orient="horizontal")
         body.pack(fill="both", expand=True, pady=(12, 0))
 
-        left = ttk.Frame(body); right = ttk.Frame(body)
+        left = ttk.Frame(body);
+        right = ttk.Frame(body)
         body.add(left, weight=2)
         body.add(right, weight=5)
 
@@ -835,7 +1564,7 @@ class EEGApp(_BaseTk):
         )
         self.cbo_table.current(0)
         self.cbo_table.pack(fill="x", pady=(10, 10))
-        self.cbo_table.bind("<<ComboboxSelected>>", lambda e: self._render_current_table())
+        self.cbo_table.bind("<<ComboboxSelected>>", self._on_table_choice_changed)
 
         self.tbl = ttk.Treeview(left_card, show="headings")
         self.tbl.pack(fill="both", expand=True)
@@ -864,7 +1593,7 @@ class EEGApp(_BaseTk):
 
         # conclusions
         concl_card = ttk.Frame(root, padding=14, style="Card.TFrame")
-        concl_card.pack(fill="x", pady=(12, 0))
+        concl_card.pack(fill="both", expand=True, pady=(12, 0))
         ttk.Label(concl_card, text="Анализ и выводы", style="H2.TLabel").pack(anchor="w", pady=(0, 8))
 
         self.txt_conclusions = tk.Text(
@@ -872,7 +1601,10 @@ class EEGApp(_BaseTk):
             insertbackground=UI["text"], highlightthickness=1,
             highlightbackground=UI["border"], bd=0, wrap="word",
         )
-        self.txt_conclusions.pack(fill="both", expand=True)
+        scr = ttk.Scrollbar(concl_card, orient="vertical", command=self.txt_conclusions.yview)
+        scr.pack(side="right", fill="y")
+        self.txt_conclusions.configure(yscrollcommand=scr.set)
+        self.txt_conclusions.pack(side="left", fill="both", expand=True)
         self.txt_conclusions.insert("1.0", "Запустите анализ, чтобы сформировать выводы.")
         self.txt_conclusions.config(state="disabled")
 
@@ -914,79 +1646,193 @@ class EEGApp(_BaseTk):
         self._analysis_thread.start()
 
     def _run_lab5_worker(self, fs_user: float):
+        """Воркeр анализа (в отдельном потоке).
+
+        УЧЁТ ЭЛЕКТРОДОВ/КАНАЛОВ:
+        - Если выбраны электроды (O1/Oz/O2 и т.п.) и такие колонки есть в CSV -> считаем по ним.
+        - Если выбраны электроды, но в CSV только один сигналовый столбец -> считаем по нему,
+          а выбранные электроды используем как метку (в таблицах/выводах).
+        - Если ничего не выбрано -> считаем по всем числовым каналам (кроме времени).
+        """
         try:
             self._ui_queue.put(("status", "Чтение CSV…"))
+
+            def _try_read_csv_local(p: str) -> pd.DataFrame:
+                try:
+                    return pd.read_csv(p, sep=None, engine="python")
+                except Exception:
+                    pass
+                for sep in [",", ";", "\t"]:
+                    for dec in [".", ","]:
+                        try:
+                            return pd.read_csv(p, sep=sep, decimal=dec, engine="python")
+                        except Exception:
+                            continue
+                return pd.read_csv(p, engine="python")
+
+            def _to_num(s: pd.Series) -> pd.Series:
+                if s.dtype == object:
+                    s = s.astype(str).str.replace(",", ".", regex=False)
+                return pd.to_numeric(s, errors="coerce")
+
+            def _pick_time_col(cols: List[str]) -> Optional[str]:
+                for c in cols:
+                    lc = str(c).lower()
+                    if "time" in lc or "время" in lc:
+                        return str(c)
+                return None
+
+            # --- собрать записи по каждому файлу и каждому каналу ---
             records: List[Dict[str, Any]] = []
+            selected = list(self.selected_electrodes)  # может быть []
+
             for path in self.loaded_files:
-                t, x, tcol, xcol = load_time_and_signal(path)
-                fs_est = estimate_fs_from_time(t, fallback=fs_user)
-                fs_hz = fs_user if fs_user > 0 else fs_est
-                name = os.path.splitext(os.path.basename(path))[0]
+                df = _try_read_csv_local(path)
+                cols = [str(c) for c in df.columns]
 
-                dur = float(t[-1] - t[0]) if len(t) > 1 else 0.0
-                nan_ratio = float(np.mean(~np.isfinite(x))) if len(x) else 1.0
+                time_col = _pick_time_col(cols)
 
-                records.append({
-                    "name": name,
-                    "path": path,
-                    "t": t,
-                    "x": x,
-                    "fs": fs_hz,
-                    "time_col": tcol,
-                    "sig_col": xcol,
-                    "duration_s": dur,
-                    "nan_ratio": nan_ratio,
-                    "montage": self.eeg_montage.get(),
-                    "channel_hint": self.eeg_channel_hint.get(),
-                })
+                # числовые колонки
+                numeric_cols: List[str] = []
+                for c in cols:
+                    sn = _to_num(df[c])
+                    if sn.notna().sum() >= max(5, int(0.05 * len(df))):
+                        numeric_cols.append(c)
 
+                if not numeric_cols:
+                    raise ValueError(f"{os.path.basename(path)}: нет числовых столбцов")
+
+                # сигналовые колонки (кроме времени)
+                signal_cols = [c for c in numeric_cols if (time_col is None or c != time_col)]
+                if not signal_cols:
+                    # если единственная числовая колонка и она же время — берём её как сигнал (редко)
+                    signal_cols = [numeric_cols[0]]
+
+                # каналы, по которым считаем
+                channels_to_use: List[str] = []
+                electrode_label_for: Dict[str, str] = {}
+
+                if selected:
+                    existing = [ch for ch in selected if ch in cols]
+                    if existing:
+                        channels_to_use = existing[: self.max_selected_electrodes]
+                        for ch in channels_to_use:
+                            electrode_label_for[ch] = ch
+                    else:
+                        # выбранные электроды НЕ являются названиями колонок -> считаем по одному сигналу
+                        ch = signal_cols[0]
+                        channels_to_use = [ch]
+                        electrode_label_for[ch] = ", ".join(selected)
+                else:
+                    # ничего не выбрано -> считаем по всем сигналовым колонкам (но ограничим, чтобы UI не умер)
+                    channels_to_use = signal_cols[: max(1, min(len(signal_cols), 8))]
+                    for ch in channels_to_use:
+                        electrode_label_for[ch] = ch  # метка = имя колонки
+
+                for ch in channels_to_use:
+                    x = _to_num(df[ch]).to_numpy(dtype=float)
+
+                    # время
+                    if time_col is not None and time_col in cols:
+                        t = _to_num(df[time_col]).to_numpy(dtype=float)
+                        mask = np.isfinite(t) & np.isfinite(x)
+                        t, x = t[mask], x[mask]
+                        if len(t) > 2 and not np.all(np.diff(t) > 0):
+                            t = np.arange(len(x)) / FS_HZ_DEFAULT
+                            time_used = "synthetic_time"
+                        else:
+                            time_used = time_col
+                    else:
+                        mask = np.isfinite(x)
+                        x = x[mask]
+                        t = np.arange(len(x)) / FS_HZ_DEFAULT
+                        time_used = "synthetic_time"
+
+                    # оценка FS
+                    fs_est = estimate_fs_from_time(t, fallback=fs_user)
+                    fs_hz = fs_user if fs_user > 0 else fs_est
+
+                    name = os.path.splitext(os.path.basename(path))[0]
+                    dur = float(t[-1] - t[0]) if len(t) > 1 else 0.0
+                    nan_ratio = float(np.mean(~np.isfinite(x))) if len(x) else 1.0
+
+                    records.append(
+                        {
+                            "name": name,
+                            "path": path,
+                            "t": t,
+                            "x": x,
+                            "fs": fs_hz,
+                            "time_col": time_used,
+                            "sig_col": ch,
+                            "electrode_label": electrode_label_for.get(ch, ch),
+                            "duration_s": dur,
+                            "nan_ratio": nan_ratio,
+                            "montage": self.eeg_montage.get(),
+                            "channel_hint": self.eeg_channel_hint.get(),
+                        }
+                    )
+
+            # --- PSD и мощности ---
             self._ui_queue.put(("status", "PSD и мощности диапазонов…"))
-            band_rows = []
+            band_rows: List[Dict[str, Any]] = []
             for r in records:
                 freqs, psd = compute_psd(r["x"], fs_hz=r["fs"], nperseg=1024)
                 p_total = integrate_band_power(freqs, psd, (0.5, 40.0))
                 p_lambda = integrate_band_power(freqs, psd, LAMBDA_BAND_HZ)
                 p_alpha = integrate_band_power(freqs, psd, ALPHA_BAND_HZ)
 
-                band_rows.append({
-                    "Файл": r["name"],
-                    "Канал": r["sig_col"],
-                    "FS (Гц)": r["fs"],
-                    "Длительность (с)": r["duration_s"],
-                    "Доля NaN": r["nan_ratio"],
-                    "P_total": p_total,
-                    "P_λ": p_lambda,
-                    "P_α": p_alpha,
-                    "P_λ / P_total": (p_lambda / p_total) if p_total > 0 else np.nan,
-                    "P_α / P_total": (p_alpha / p_total) if p_total > 0 else np.nan,
-                })
+                band_rows.append(
+                    {
+                        "Файл": r["name"],
+                        "Электрод/канал": r["electrode_label"],
+                        "Канал (CSV)": r["sig_col"],
+                        "FS (Гц)": r["fs"],
+                        "Длительность (с)": r["duration_s"],
+                        "Доля NaN": r["nan_ratio"],
+                        "P_total": p_total,
+                        "P_λ": p_lambda,
+                        "P_α": p_alpha,
+                        "P_λ / P_total": (p_lambda / p_total) if (p_total and p_total > 0) else np.nan,
+                        "P_α / P_total": (p_alpha / p_total) if (p_total and p_total > 0) else np.nan,
+                    }
+                )
             band_power_df = pd.DataFrame(band_rows)
 
+            # --- λ(t) статистики ---
             self._ui_queue.put(("status", "λ(t) статистики…"))
-            lambda_rows = []
+            lambda_rows: List[Dict[str, Any]] = []
             for r in records:
                 lam = extract_lambda_signal(r["x"], fs_hz=r["fs"])
                 t_win, p_win = sliding_window_power(lam, fs_hz=r["fs"], window_sec=2.0, overlap=0.5)
-                lambda_rows.append({
-                    "Файл": r["name"],
-                    "Средняя мощность λ(t)": float(np.mean(p_win)) if len(p_win) else np.nan,
-                    "Максимум λ(t)": float(np.max(p_win)) if len(p_win) else np.nan,
-                    "Минимум λ(t)": float(np.min(p_win)) if len(p_win) else np.nan,
-                })
+                lambda_rows.append(
+                    {
+                        "Файл": r["name"],
+                        "Электрод/канал": r["electrode_label"],
+                        "Средняя мощность λ(t)": float(np.mean(p_win)) if len(p_win) else np.nan,
+                        "Максимум λ(t)": float(np.max(p_win)) if len(p_win) else np.nan,
+                        "Минимум λ(t)": float(np.min(p_win)) if len(p_win) else np.nan,
+                    }
+                )
             lambda_time_df = pd.DataFrame(lambda_rows)
 
             summary_df = (
-                band_power_df.merge(lambda_time_df, on=["Файл"])
+                band_power_df.merge(lambda_time_df, on=["Файл", "Электрод/канал"], how="left")
                 .sort_values("P_λ / P_total", ascending=False)
                 .reset_index(drop=True)
             )
 
-            self._ui_queue.put(("done", {
-                "records": records,
-                "band_power_df": band_power_df,
-                "lambda_time_df": lambda_time_df,
-                "summary_df": summary_df,
-            }))
+            self._ui_queue.put(
+                (
+                    "done",
+                    {
+                        "records": records,
+                        "band_power_df": band_power_df,
+                        "lambda_time_df": lambda_time_df,
+                        "summary_df": summary_df,
+                    },
+                )
+            )
         except Exception as e:
             self._ui_queue.put(("error", str(e)))
 
@@ -1039,6 +1885,16 @@ class EEGApp(_BaseTk):
 
         self.after(60, self._poll_ui_queue)
 
+    def _on_table_choice_changed(self, _event=None):
+        # Иногда раскрытие/смена Combobox может лагать из‑за немедленной перерисовки таблицы.
+        # Делаем отложенную отрисовку в idle, чтобы UI успевал отрисовать сам combobox.
+        try:
+            if hasattr(self, "_table_render_after_id") and self._table_render_after_id:
+                self.after_cancel(self._table_render_after_id)
+        except Exception:
+            pass
+        self._table_render_after_id = self.after_idle(self._render_current_table)
+
     def _render_current_table(self):
         choice = self.cbo_table.get()
         if choice == "Мощности по диапазонам":
@@ -1048,30 +1904,51 @@ class EEGApp(_BaseTk):
         else:
             df = self.summary_df
 
+        # очистка если нет данных
         if df is None or df.empty:
-            self.tbl.delete(*self.tbl.get_children())
+            try:
+                self.tbl.delete(*self.tbl.get_children())
+            except Exception:
+                pass
             self.tbl["columns"] = []
             return
 
-        self.tbl.delete(*self.tbl.get_children())
+        # 1) Заголовки/колонки — обновляем только если реально изменились
         cols = list(df.columns)
-        self.tbl["columns"] = cols
-        for c in cols:
-            self.tbl.heading(c, text=c)
-            self.tbl.column(c, width=160, anchor="w")
+        if getattr(self, "_tbl_last_cols", None) != cols:
+            self.tbl["columns"] = cols
+            for c in cols:
+                self.tbl.heading(c, text=c)
+                self.tbl.column(c, width=170, anchor="w", stretch=True)
+            self._tbl_last_cols = cols
+
+        # 2) Данные — ограничим количество строк, чтобы UI не подвисал на больших CSV
+        try:
+            self.tbl.delete(*self.tbl.get_children())
+        except Exception:
+            pass
 
         show_df = df.copy()
         for c in show_df.columns:
             if pd.api.types.is_numeric_dtype(show_df[c]):
                 show_df[c] = show_df[c].round(6)
 
+        max_rows = 250
+        if len(show_df) > max_rows:
+            show_df = show_df.iloc[:max_rows].copy()
+
         for _, row in show_df.iterrows():
             self.tbl.insert("", "end", values=[row[c] for c in cols])
+
+        # маленькая подсказка в статусе, если срезали строки
+        if df is not None and len(df) > max_rows:
+            self._set_status(f"Таблица: показаны первые {max_rows} строк из {len(df)} (чтобы не лагало)")
 
     def _render_plots(self):
         self.plot_area.clear()
         if self._last_records is None:
-            ttk.Label(self.plot_area.inner, text="Запустите анализ, чтобы увидеть графики.", style="Muted.TLabel").pack(padx=12, pady=12, anchor="w")
+            ttk.Label(self.plot_area.inner, text="Запустите анализ, чтобы увидеть графики.", style="Muted.TLabel").pack(
+                padx=12, pady=12, anchor="w")
             return
 
         mode = self.plot_mode.get()
@@ -1089,14 +1966,15 @@ class EEGApp(_BaseTk):
         for r in self._last_records:
             wrap = ttk.Frame(self.plot_area.inner, padding=14, style="Card.TFrame")
             wrap.pack(fill="x", expand=True, padx=12, pady=12)
-            ttk.Label(wrap, text=r["name"], style="H2.TLabel").pack(anchor="w", pady=(0, 10))
+            ttk.Label(wrap, text=f'{r["name"]} | {r.get("electrode_label", "")}', style="H2.TLabel").pack(anchor="w",
+                                                                                                          pady=(0, 10))
 
             if mode == "RAW":
-                fig = make_raw_figure(r["t"], r["x"], r["fs"], r["name"])
+                fig = make_raw_figure(r["t"], r["x"], r["fs"], f'{r["name"]} | {r.get("electrode_label", "")}')
             elif mode == "PSD":
-                fig = make_psd_figure(r["x"], r["fs"], r["name"])
+                fig = make_psd_figure(r["x"], r["fs"], f'{r["name"]} | {r.get("electrode_label", "")}')
             else:
-                fig = make_lambda_figure(r["t"], r["x"], r["fs"], r["name"])
+                fig = make_lambda_figure(r["t"], r["x"], r["fs"], f'{r["name"]} | {r.get("electrode_label", "")}')
 
             canv = FigureCanvasTkAgg(fig, master=wrap)
             canv.get_tk_widget().pack(fill="x", expand=True)
@@ -1140,7 +2018,8 @@ class EEGApp(_BaseTk):
             styles["Heading1"].fontName = base_font
             styles["Heading2"].fontName = base_font
             if "H3" not in styles:
-                styles.add(ParagraphStyle(name="H3", fontName=base_font, fontSize=12, leading=14, spaceBefore=10, spaceAfter=6))
+                styles.add(ParagraphStyle(name="H3", fontName=base_font, fontSize=12, leading=14, spaceBefore=10,
+                                          spaceAfter=6))
 
             doc = SimpleDocTemplate(
                 out_path, pagesize=A4,
@@ -1186,8 +2065,10 @@ class EEGApp(_BaseTk):
                 bars_path = os.path.join(tmpdir, "bars.png")
                 fig_b = make_bars_figure(self.summary_df)
                 save_figure_png_threadsafe(fig_b, bars_path, dpi=160)
-                try: plt.close(fig_b)
-                except Exception: pass
+                try:
+                    plt.close(fig_b)
+                except Exception:
+                    pass
 
                 story.append(Paragraph("Сравнение условий: mean/max/min мощности λ(t)", styles["Heading2"]))
                 story.append(_rl_image(bars_path, max_width_cm=17.5))
@@ -1197,7 +2078,9 @@ class EEGApp(_BaseTk):
                     self._ui_queue.put(("status", f"PDF: файл {idx}/{len(self._last_records)}…"))
 
                     name = r["name"]
-                    t = r["t"]; x = r["x"]; fs_hz = r["fs"]
+                    t = r["t"];
+                    x = r["x"];
+                    fs_hz = r["fs"]
 
                     story.append(Paragraph(f"Файл: {name}", styles["Heading2"]))
                     story.append(Paragraph(f"Канал: {r['sig_col']} | FS: {fs_hz}", styles["Normal"]))
@@ -1207,20 +2090,27 @@ class EEGApp(_BaseTk):
                     psd_path = os.path.join(tmpdir, f"{name}_psd.png")
                     lam_path = os.path.join(tmpdir, f"{name}_lambda.png")
 
-                    fig1 = make_raw_figure(t, x, fs_hz, name, for_pdf=True)
+                    title = f"{name} | {r.get('electrode_label', '')}"
+                    fig1 = make_raw_figure(t, x, fs_hz, title, for_pdf=True)
                     save_figure_png_threadsafe(fig1, raw_path, dpi=160)
-                    try: plt.close(fig1)
-                    except Exception: pass
+                    try:
+                        plt.close(fig1)
+                    except Exception:
+                        pass
 
-                    fig2 = make_psd_figure(x, fs_hz, name, for_pdf=True)
+                    fig2 = make_psd_figure(x, fs_hz, title, for_pdf=True)
                     save_figure_png_threadsafe(fig2, psd_path, dpi=160)
-                    try: plt.close(fig2)
-                    except Exception: pass
+                    try:
+                        plt.close(fig2)
+                    except Exception:
+                        pass
 
-                    fig3 = make_lambda_figure(t, x, fs_hz, name, for_pdf=True)
+                    fig3 = make_lambda_figure(t, x, fs_hz, title, for_pdf=True)
                     save_figure_png_threadsafe(fig3, lam_path, dpi=160)
-                    try: plt.close(fig3)
-                    except Exception: pass
+                    try:
+                        plt.close(fig3)
+                    except Exception:
+                        pass
 
                     story.append(Paragraph("Сигнал (общий вид + зум)", styles["H3"]))
                     story.append(_rl_image(raw_path, max_width_cm=17.5))
@@ -1240,9 +2130,11 @@ class EEGApp(_BaseTk):
         except Exception as e:
             self._ui_queue.put(("pdf_error", str(e)))
 
+
 def main():
     app = EEGApp()
     app.mainloop()
+
 
 if __name__ == "__main__":
     main()

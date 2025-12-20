@@ -7,6 +7,11 @@ FS_HZ_DEFAULT = 250.0
 LAMBDA_BAND_HZ = (4.0, 6.0)
 ALPHA_BAND_HZ = (7.0, 13.0)
 
+UI_TEXT = {
+    "lambda_hint": "Рекомендуемый диапазон λ-ритма: 4–6 Гц (по методичке)",
+    "alpha_hint": "Альфа-ритм: 8–13 Гц (справочно)",
+    "export_progress": "Экспорт…",
+}
 UI = {
     "bg":     "#FFF7ED",
     "panel":  "#FFFFFF",

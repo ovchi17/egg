@@ -236,7 +236,6 @@ class ArduinoSerialStreamer(threading.Thread):
         finally:
             self.close_now()
 
-
 _BaseTk = TkinterDnD.Tk if DND_OK else tk.Tk
 
 
@@ -420,8 +419,8 @@ class EEGApp(_BaseTk):
         self.max_selected_electrodes: int = 3
         self.stream_labels: List[str] = []
         self._live_running = False
-        self._stream_time_offset = 0.0  # чтобы “продолжать” после Stop
-        self._last_live_draw_ts = 0.0  # FPS-лимит
+        self._stream_time_offset = 0.0     # чтобы “продолжать” после Stop
+        self._last_live_draw_ts = 0.0      # FPS-лимит
         self._setup_style()
         self._build_ui()
         # --- LIVE stream state ---
@@ -461,7 +460,6 @@ class EEGApp(_BaseTk):
         # ✅ ВАЖНО: canvas может ещё не существовать при построении UI
         if hasattr(self, "canvas_live") and self.canvas_live is not None:
             self.canvas_live.draw_idle()
-
     def _selected_electrodes_str(self) -> str:
         """Строка с выбранными электродами (в порядке выбора)."""
         return ", ".join(self.selected_electrodes) if self.selected_electrodes else "(не выбрано)"
@@ -483,6 +481,58 @@ class EEGApp(_BaseTk):
                     self.canvas_live.draw_idle()
             except Exception:
                 pass
+
+    def _infer_channel_capacity(self) -> int:
+        """Сколько каналов реально ожидается (для ограничения выбора электродов).
+        Логика:
+        - если идёт онлайн-стрим -> берём число каналов стрима;
+        - иначе, если загружены CSV -> берём МИНИМУМ числа сигналовых колонок среди файлов (без time);
+        - иначе -> допускаем до 3 (как максимум).
+        """
+        # онлайн
+        try:
+            if self.streamer is not None and hasattr(self.streamer, "cfg"):
+                return max(1, int(getattr(self.streamer.cfg, "channels", 1)))
+        except Exception:
+            pass
+
+        # CSV
+        if getattr(self, "loaded_files", None):
+            counts = []
+            for p in self.loaded_files:
+                try:
+                    df = pd.read_csv(p, sep=None, engine="python")
+                except Exception:
+                    try:
+                        df = pd.read_csv(p, engine="python")
+                    except Exception:
+                        continue
+                cols = [str(c) for c in df.columns]
+                # time col heuristic
+                time_col = None
+                for c in cols:
+                    lc = c.lower()
+                    if "time" in lc or "время" in lc:
+                        time_col = c
+                        break
+                numeric_cols = []
+                for c in cols:
+                    s = df[c]
+                    if s.dtype == object:
+                        s = s.astype(str).str.replace(",", ".", regex=False)
+                    s = pd.to_numeric(s, errors="coerce")
+                    if s.notna().sum() >= max(5, int(0.05 * len(df))):
+                        numeric_cols.append(c)
+                sig_cols = [c for c in numeric_cols if (time_col is None or c != time_col)]
+                if not sig_cols and numeric_cols:
+                    sig_cols = [numeric_cols[0]]
+                if sig_cols:
+                    counts.append(len(sig_cols))
+            if counts:
+                return max(1, min(counts))
+
+        return 3
+
 
     # ------- style -------
     def _setup_style(self):
@@ -732,7 +782,7 @@ class EEGApp(_BaseTk):
         card.pack(fill="x")
 
         ttk.Label(card, text="Порт:", style="Muted.TLabel").pack(side="left", padx=(0, 6))
-        self.cbo_port = ttk.Combobox(card, width=28, state="normal")
+        self.cbo_port = ttk.Combobox(card, width=28, state="readonly")
         self.cbo_port.pack(side="left", padx=(0, 16))
 
         # Baud оставим как "расширенный параметр": иногда Arduino реально прошит на другой baud.
@@ -804,7 +854,6 @@ class EEGApp(_BaseTk):
                 self.serial_queue.get_nowait()
         except queue.Empty:
             pass
-
     def refresh_ports(self, silent: bool = False):
         ports = []
 
@@ -843,12 +892,25 @@ class EEGApp(_BaseTk):
             messagebox.showerror("Serial", "pyserial не установлен.\n\npip install pyserial")
             return
 
+        # Требование курсовой: перед записью выберите электрод(ы) во вкладке 10–20
+        if not getattr(self, 'selected_electrodes', None):
+            messagebox.showinfo(
+                'Выбор электродов',
+                'Перед стартом выберите электрод во вкладке «Система 10–20» (минимум 1).'
+            )
+            return
+
         # фиксируем электроды на момент старта
-        labels = list(getattr(self, "selected_electrodes", [])) or ["A0"]
-        self.stream_labels = labels[:]  # snapshot
-        n_channels = len(self.stream_labels)
+        # В онлайн-режиме по умолчанию ожидаем 1 канал (A0). Выбор электродов здесь — это метка.
+        label = ", ".join(list(getattr(self, "selected_electrodes", [])))
+        self.stream_labels = [label] if label else ["A0"]
+        n_channels = 1
 
         port = (self.cbo_port.get() or "").strip()
+        available_ports = list(self.cbo_port.cget('values') or [])
+        if available_ports and port and port not in available_ports:
+            # если пользователь вручную вписал что-то странное
+            port = ''
         if not port:
             messagebox.showerror("Ошибка", "Выбери порт.")
             return
@@ -1006,6 +1068,9 @@ class EEGApp(_BaseTk):
     def add_live_to_files(self):
         """Совместимость: кнопка вызывает это имя."""
         return self.add_live_record_to_files()
+    def add_live_to_files(self):
+        """Добавить текущую онлайн-запись во вкладку «Файлы» (для анализа)."""
+        return self.add_live_record_to_files()
 
     def add_live_record_to_files(self):
         if not self.live_t:
@@ -1047,12 +1112,12 @@ class EEGApp(_BaseTk):
                 self._refresh_files_count()
 
         messagebox.showinfo("Добавлено", "Запись добавлена во вкладку «Файлы» и готова к анализу.")
-
     def add_live_to_files(self):
         """Кнопка 'Добавить в анализ' на вкладке Онлайн.
         Это алиас, чтобы не ломать старые имена после Ctrl+Z.
         """
         return self.add_live_record_to_files()
+
 
     def save_live_csv(self):
         if not self.live_t:
@@ -1068,9 +1133,8 @@ class EEGApp(_BaseTk):
 
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["время_с"] + (self.selected_electrodes if self.selected_electrodes else [f"CH{i + 1}" for i in
-                                                                                                 range(
-                                                                                                     self.live_channels)]))
+            header_label = ", ".join(self.selected_electrodes) if self.selected_electrodes else "A0"
+            w.writerow(["время_с", header_label])
 
             n = len(self.live_t)
             for k in range(n):
@@ -1099,9 +1163,12 @@ class EEGApp(_BaseTk):
             font=FONT_H2,
         ).pack(side="left")
 
+        # динамический лимит: если в CSV один канал, то и электрод один
+        cap = max(1, min(self.max_selected_electrodes, self._infer_channel_capacity()))
+        self._1020_cap = cap
         ttk.Label(
             head,
-            text="(максимум 3 электрода)",
+            text=f"(максимум {cap} электрод(а))",
             foreground=UI["muted"],
             font=FONT_SMALL,
         ).pack(side="left", padx=(10, 0))
@@ -1146,25 +1213,27 @@ class EEGApp(_BaseTk):
         # Load montage positions
         montage = mne.channels.make_standard_montage("standard_1020")
         ch_pos = montage.get_positions()["ch_pos"]  # dict: name -> (x,y,z)
-        # Keep only standard EEG channels (exclude fiducials)
-        self._1020_positions = {k: (float(v[0]), float(v[1])) for k, v in ch_pos.items() if k and k[0].isalpha()}
+        # Для курсовой используем компактный набор точек (классический 10–20),
+        # иначе подписи начинают накладываться друг на друга.
+        keep = {
+            "Fp1","Fp2","F7","F3","Fz","F4","F8",
+            "T3","C3","Cz","C4","T4",
+            "T5","P3","Pz","P4","T6",
+            "O1","Oz","O2"
+        }
+        self._1020_positions = {
+            k: (float(v[0]), float(v[1]))
+            for k, v in ch_pos.items()
+            if k in keep
+        }
 
         # Visual settings
-        self._1020_radius = 10  # базовое; в draw пересчитаем под размер
+        self._1020_radius = 10  # base; реальный радиус считаем от размера окна  # базовое; в draw пересчитаем под размер
         self._1020_hit_radius = 14  # базовое; в draw пересчитаем под размер
         self._1020_items = {}  # name -> (oval_id, text_id)
 
         # Internal selection list (preserve order)
         self._1020_selected: List[str] = list(self.selected_electrodes)
-
-        # Показываем подписи не всегда (иначе они накладываются при маленьком окне).
-        # В маленьком масштабе показываем подписи только для "основных" точек и выбранных электродов.
-        self._1020_major_labels = {
-            "Fp1", "Fp2", "F7", "F3", "Fz", "F4", "F8",
-            "T7", "C3", "Cz", "C4", "T8",
-            "P7", "P3", "Pz", "P4", "P8",
-            "O1", "Oz", "O2",
-        }
 
         def _update_selected_text():
             if self._1020_selected:
@@ -1183,15 +1252,13 @@ class EEGApp(_BaseTk):
             ys = [p[1] for p in self._1020_positions.values()]
             rx = max(abs(min(xs)), abs(max(xs)), 1e-6)
             ry = max(abs(min(ys)), abs(max(ys)), 1e-6)
-            r = max(rx, ry, 1e-6)
-            nx = x / r
-            ny = y / r
+            nx = x / rx
+            ny = y / ry
 
             # проекция: +x вправо, +y вверх (но canvas вниз)
             px = cx + (nx * (size / 2))
             py = cy - (ny * (size / 2))
             return px, py
-
         def _draw():
             c = self._1020_canvas
             c.delete("all")
@@ -1234,7 +1301,9 @@ class EEGApp(_BaseTk):
             # Electrodes
             for name, (x, y) in self._1020_positions.items():
                 px, py = _project_to_canvas(x, y, w, h)
-                r = self._1020_radius
+                # масштабируем размер точки относительно головы
+                base = max(6, min(14, int(min(w, h) * 0.018)))
+                r = base
 
                 selected = name in self._1020_selected
                 fill = UI["accent"] if selected else UI["panel"]
@@ -1242,7 +1311,7 @@ class EEGApp(_BaseTk):
 
                 oid = c.create_oval(px - r, py - r, px + r, py + r, fill=fill, outline=outline, width=2)
                 # подписи рисуем не для всех, иначе всё слипается на маленьком окне
-                show_label = (min(w, h) >= 820) or selected or (name in self._1020_major_labels)
+                show_label = selected or (min(w, h) >= 820 and name in ("Fp1","Fp2","Fz","Cz","Pz","Oz","O1","O2"))
                 tid = None
                 if show_label:
                     # динамический размер шрифта
@@ -1272,16 +1341,21 @@ class EEGApp(_BaseTk):
             return None
 
         def _toggle(name: str):
+            cap = int(getattr(self, "_1020_cap", self.max_selected_electrodes))
             if name in self._1020_selected:
                 self._1020_selected.remove(name)
             else:
-                if len(self._1020_selected) >= self.max_selected_electrodes:
-                    messagebox.showinfo(
-                        "Ограничение выбора",
-                        f"Можно выбрать не более {self.max_selected_electrodes} электродов."
-                    )
-                    return
-                self._1020_selected.append(name)
+                if cap <= 1:
+                    # один канал -> один электрод: выбираем как метку
+                    self._1020_selected[:] = [name]
+                else:
+                    if len(self._1020_selected) >= cap:
+                        messagebox.showinfo(
+                            "Ограничение выбора",
+                            f"Можно выбрать не более {cap} электрод(ов) для текущих данных."
+                        )
+                        return
+                    self._1020_selected.append(name)
             _draw()
 
         def _on_click(evt):
@@ -1307,13 +1381,10 @@ class EEGApp(_BaseTk):
         ttk.Label(
             rec_card,
             text=(
-                "• Для λ-ритма чаще используют затылочные зоны:\n"
-                "  O1, Oz, O2 (самый частый вариант)\n"
-                "• Допустимо: теменно-затылочные:\n"
-                "  Pz + Oz/O2 (если нет чисто затылочных)\n"
-                "• Для сравнения можно взять лобные:\n"
-                "  Fp1/Fp2/Fz (как контроль)\n\n"
-                "Совет: выбери 1–3 электрода и не меняй их во время записи."
+                "• Для регистрации λ‑ритма обычно используют затылочные отведения: O1, Oz, O2.\n"
+                "• При отсутствии чисто затылочных допускаются теменно‑затылочные варианты: Pz вместе с Oz/O2.\n"
+                "• Для контрольного сравнения можно выбрать лобные отведения (Fp1/Fp2/Fz).\n\n"
+                "Рекомендация: фиксируйте выбранные отведения на время одной записи и не меняйте их «на лету»."
             ),
             style="Muted.TLabel",
             justify="left",
@@ -1350,7 +1421,8 @@ class EEGApp(_BaseTk):
                 return
             self._1020_selected.clear()
             for ch in rec:
-                if ch in self._1020_positions and len(self._1020_selected) < self.max_selected_electrodes:
+                cap = int(getattr(self, "_1020_cap", self.max_selected_electrodes))
+                if ch in self._1020_positions and len(self._1020_selected) < cap:
                     self._1020_selected.append(ch)
             _draw()
 
@@ -1417,6 +1489,21 @@ class EEGApp(_BaseTk):
         drop_text = "Перетащите CSV сюда" if DND_OK else "Добавьте CSV кнопкой выше"
         self.drop_label = ttk.Label(drop, text=drop_text, style="Muted.TLabel", anchor="center", justify="center")
         self.drop_label.pack(fill="x")
+
+
+        info = ttk.Frame(card, padding=12, style="Card2.TFrame")
+        info.pack(fill="x", pady=(0, 10))
+        ttk.Label(info, text="Рекомендации по CSV", style="H2.TLabel").pack(anchor="w")
+        ttk.Label(
+            info,
+            text=(
+                "• Желательно иметь колонку времени (time_s / время_с) и 1+ колонок сигнала.\n"
+                "• Если времени нет — программа построит синтетическое время по FS.\n"
+                "• Для сравнения условий используйте одинаковый FS и одинаковый набор отведений."
+            ),
+            style="Muted.TLabel",
+            justify="left",
+        ).pack(anchor="w", pady=(6, 0))
 
         ttk.Label(card, text="Список добавленных файлов", style="H2.TLabel").pack(anchor="w", pady=(6, 6))
 
@@ -1536,6 +1623,9 @@ class EEGApp(_BaseTk):
         self.btn_run = ttk.Button(controls, text="▶ Запустить анализ", command=self.run_lab5, style="Primary.TButton")
         self.btn_run.pack(side="left", padx=(0, 8))
 
+        self.btn_reset_analysis = ttk.Button(controls, text="↺ Сброс анализа", command=self.reset_analysis, style="Ghost.TButton")
+        self.btn_reset_analysis.pack(side="left", padx=(0, 8))
+
         self.btn_report = ttk.Button(controls, text="📄 Экспорт PDF", command=self.export_report_pdf,
                                      style="Ghost.TButton")
         self.btn_report.pack(side="left", padx=(0, 12))
@@ -1545,13 +1635,16 @@ class EEGApp(_BaseTk):
         self.lbl_an_status = ttk.Label(controls, text="Готово", style="Muted.TLabel")
         self.lbl_an_status.pack(side="left")
 
-        body = ttk.PanedWindow(root, orient="horizontal")
-        body.pack(fill="both", expand=True, pady=(12, 0))
+        # Вертикальная компоновка: сверху графики/таблица, снизу "Анализ и выводы" (можно растягивать).
+        vpan = ttk.PanedWindow(root, orient="vertical")
+        vpan.pack(fill="both", expand=True, pady=(12, 0))
 
-        left = ttk.Frame(body);
+        body = ttk.PanedWindow(vpan, orient="horizontal")
+        left = ttk.Frame(body)
         right = ttk.Frame(body)
         body.add(left, weight=2)
         body.add(right, weight=5)
+        vpan.add(body, weight=5)
 
         # left: table + 10-20
         left_card = ttk.Frame(left, padding=14, style="Card.TFrame")
@@ -1564,7 +1657,7 @@ class EEGApp(_BaseTk):
         )
         self.cbo_table.current(0)
         self.cbo_table.pack(fill="x", pady=(10, 10))
-        self.cbo_table.bind("<<ComboboxSelected>>", self._on_table_choice_changed)
+        self.cbo_table.bind("<<ComboboxSelected>>", lambda e: self._render_current_table())
 
         self.tbl = ttk.Treeview(left_card, show="headings")
         self.tbl.pack(fill="both", expand=True)
@@ -1592,19 +1685,23 @@ class EEGApp(_BaseTk):
         self.plot_area.pack(fill="both", expand=True)
 
         # conclusions
-        concl_card = ttk.Frame(root, padding=14, style="Card.TFrame")
-        concl_card.pack(fill="both", expand=True, pady=(12, 0))
+        concl_card = ttk.Frame(vpan, padding=14, style="Card.TFrame")
+        vpan.add(concl_card, weight=2)
         ttk.Label(concl_card, text="Анализ и выводы", style="H2.TLabel").pack(anchor="w", pady=(0, 8))
 
+        txt_wrap = ttk.Frame(concl_card, style="Card.TFrame")
+        txt_wrap.pack(fill="both", expand=True)
+        scr_y = ttk.Scrollbar(txt_wrap, orient="vertical")
+        scr_y.pack(side="right", fill="y")
+
         self.txt_conclusions = tk.Text(
-            concl_card, height=10, bg=UI["panel2"], fg=UI["text"],
+            txt_wrap, height=10, bg=UI["panel2"], fg=UI["text"],
             insertbackground=UI["text"], highlightthickness=1,
             highlightbackground=UI["border"], bd=0, wrap="word",
         )
-        scr = ttk.Scrollbar(concl_card, orient="vertical", command=self.txt_conclusions.yview)
-        scr.pack(side="right", fill="y")
-        self.txt_conclusions.configure(yscrollcommand=scr.set)
         self.txt_conclusions.pack(side="left", fill="both", expand=True)
+        self.txt_conclusions.configure(yscrollcommand=scr_y.set)
+        scr_y.configure(command=self.txt_conclusions.yview)
         self.txt_conclusions.insert("1.0", "Запустите анализ, чтобы сформировать выводы.")
         self.txt_conclusions.config(state="disabled")
 
@@ -1625,6 +1722,38 @@ class EEGApp(_BaseTk):
             self.btn_report.config(state="normal")
             self.ent_fs.config(state="normal")
         self._set_status(status_text)
+
+    def reset_analysis(self):
+        """Очистить результаты анализа (графики/таблицы/выводы), чтобы посчитать заново."""
+        if self._analysis_busy or self._pdf_busy:
+            return
+        self.band_power_df = None
+        self.lambda_time_df = None
+        self.summary_df = None
+        self._last_records = None
+        # таблица
+        try:
+            self.tbl.delete(*self.tbl.get_children())
+            self.tbl["columns"] = []
+        except Exception:
+            pass
+        # графики
+        try:
+            self.plot_area.clear()
+            ttk.Label(self.plot_area.inner, text="Результаты очищены. Запустите анализ заново.", style="Muted.TLabel").pack(
+                padx=12, pady=12, anchor="w")
+        except Exception:
+            pass
+        # выводы
+        self.conclusions_text = ""
+        try:
+            self.txt_conclusions.config(state="normal")
+            self.txt_conclusions.delete("1.0", "end")
+            self.txt_conclusions.insert("1.0", "Результаты очищены. Нажмите «Запустить анализ». ")
+            self.txt_conclusions.config(state="disabled")
+        except Exception:
+            pass
+        self._set_status("Сброс выполнен")
 
     def run_lab5(self):
         if self._analysis_busy or self._pdf_busy:
@@ -1885,17 +2014,8 @@ class EEGApp(_BaseTk):
 
         self.after(60, self._poll_ui_queue)
 
-    def _on_table_choice_changed(self, _event=None):
-        # Иногда раскрытие/смена Combobox может лагать из‑за немедленной перерисовки таблицы.
-        # Делаем отложенную отрисовку в idle, чтобы UI успевал отрисовать сам combobox.
-        try:
-            if hasattr(self, "_table_render_after_id") and self._table_render_after_id:
-                self.after_cancel(self._table_render_after_id)
-        except Exception:
-            pass
-        self._table_render_after_id = self.after_idle(self._render_current_table)
-
     def _render_current_table(self):
+
         choice = self.cbo_table.get()
         if choice == "Мощности по диапазонам":
             df = self.band_power_df
@@ -1904,45 +2024,42 @@ class EEGApp(_BaseTk):
         else:
             df = self.summary_df
 
-        # очистка если нет данных
         if df is None or df.empty:
-            try:
-                self.tbl.delete(*self.tbl.get_children())
-            except Exception:
-                pass
+            self.tbl.delete(*self.tbl.get_children())
             self.tbl["columns"] = []
             return
 
-        # 1) Заголовки/колонки — обновляем только если реально изменились
+        # подготовка
+        self.tbl.delete(*self.tbl.get_children())
         cols = list(df.columns)
-        if getattr(self, "_tbl_last_cols", None) != cols:
-            self.tbl["columns"] = cols
-            for c in cols:
-                self.tbl.heading(c, text=c)
-                self.tbl.column(c, width=170, anchor="w", stretch=True)
-            self._tbl_last_cols = cols
-
-        # 2) Данные — ограничим количество строк, чтобы UI не подвисал на больших CSV
-        try:
-            self.tbl.delete(*self.tbl.get_children())
-        except Exception:
-            pass
+        self.tbl["columns"] = cols
+        for c in cols:
+            self.tbl.heading(c, text=c)
+            self.tbl.column(c, width=160, anchor="w")
 
         show_df = df.copy()
         for c in show_df.columns:
             if pd.api.types.is_numeric_dtype(show_df[c]):
                 show_df[c] = show_df[c].round(6)
 
-        max_rows = 250
-        if len(show_df) > max_rows:
-            show_df = show_df.iloc[:max_rows].copy()
+        rows = show_df.values.tolist()
 
-        for _, row in show_df.iterrows():
-            self.tbl.insert("", "end", values=[row[c] for c in cols])
+        # чтобы UI не подвисал на больших таблицах — вставляем порциями
+        self._table_rows_cache = rows
+        self._table_cols_cache = cols
+        self._table_insert_pos = 0
 
-        # маленькая подсказка в статусе, если срезали строки
-        if df is not None and len(df) > max_rows:
-            self._set_status(f"Таблица: показаны первые {max_rows} строк из {len(df)} (чтобы не лагало)")
+        def _step():
+            chunk = 150  # порция строк
+            end = min(self._table_insert_pos + chunk, len(self._table_rows_cache))
+            for i in range(self._table_insert_pos, end):
+                self.tbl.insert("", "end", values=self._table_rows_cache[i])
+            self._table_insert_pos = end
+            if self._table_insert_pos < len(self._table_rows_cache):
+                self.after(1, _step)
+
+        _step()
+
 
     def _render_plots(self):
         self.plot_area.clear()
@@ -1966,15 +2083,16 @@ class EEGApp(_BaseTk):
         for r in self._last_records:
             wrap = ttk.Frame(self.plot_area.inner, padding=14, style="Card.TFrame")
             wrap.pack(fill="x", expand=True, padx=12, pady=12)
-            ttk.Label(wrap, text=f'{r["name"]} | {r.get("electrode_label", "")}', style="H2.TLabel").pack(anchor="w",
-                                                                                                          pady=(0, 10))
+            title = f'{r["name"]} — {r.get("electrode_label","")}'.strip(" —")
+            ttk.Label(wrap, text=title, style="H2.TLabel").pack(anchor="w", pady=(0, 2))
+            ttk.Label(wrap, text=f'Колонка CSV: {r.get("sig_col","")} | FS: {r.get("fs",""):.2f}', style="Muted.TLabel").pack(anchor="w", pady=(0, 10))
 
             if mode == "RAW":
-                fig = make_raw_figure(r["t"], r["x"], r["fs"], f'{r["name"]} | {r.get("electrode_label", "")}')
+                fig = make_raw_figure(r["t"], r["x"], r["fs"], title)
             elif mode == "PSD":
-                fig = make_psd_figure(r["x"], r["fs"], f'{r["name"]} | {r.get("electrode_label", "")}')
+                fig = make_psd_figure(r["x"], r["fs"], title)
             else:
-                fig = make_lambda_figure(r["t"], r["x"], r["fs"], f'{r["name"]} | {r.get("electrode_label", "")}')
+                fig = make_lambda_figure(r["t"], r["x"], r["fs"], title)
 
             canv = FigureCanvasTkAgg(fig, master=wrap)
             canv.get_tk_widget().pack(fill="x", expand=True)
@@ -2090,22 +2208,21 @@ class EEGApp(_BaseTk):
                     psd_path = os.path.join(tmpdir, f"{name}_psd.png")
                     lam_path = os.path.join(tmpdir, f"{name}_lambda.png")
 
-                    title = f"{name} | {r.get('electrode_label', '')}"
-                    fig1 = make_raw_figure(t, x, fs_hz, title, for_pdf=True)
+                    fig1 = make_raw_figure(t, x, fs_hz, f"{name} — {r.get('electrode_label','')}".strip(" —"), for_pdf=True)
                     save_figure_png_threadsafe(fig1, raw_path, dpi=160)
                     try:
                         plt.close(fig1)
                     except Exception:
                         pass
 
-                    fig2 = make_psd_figure(x, fs_hz, title, for_pdf=True)
+                    fig2 = make_psd_figure(x, fs_hz, f"{name} — {r.get('electrode_label','')}".strip(" —"), for_pdf=True)
                     save_figure_png_threadsafe(fig2, psd_path, dpi=160)
                     try:
                         plt.close(fig2)
                     except Exception:
                         pass
 
-                    fig3 = make_lambda_figure(t, x, fs_hz, title, for_pdf=True)
+                    fig3 = make_lambda_figure(t, x, fs_hz, f"{name} — {r.get('electrode_label','')}".strip(" —"), for_pdf=True)
                     save_figure_png_threadsafe(fig3, lam_path, dpi=160)
                     try:
                         plt.close(fig3)

@@ -1845,7 +1845,6 @@ class EEGApp(_BaseTk):
         if not out_path:
             return
 
-        # ✅ на момент экспорта тоже обновим правило
         self._update_compare_mode_availability()
 
         self._pdf_busy = True
@@ -1866,8 +1865,17 @@ class EEGApp(_BaseTk):
             styles["Normal"].fontName = base_font
             styles["Heading1"].fontName = base_font
             styles["Heading2"].fontName = base_font
+
             if "H3" not in styles:
-                styles.add(ParagraphStyle(name="H3", fontName=base_font, fontSize=12, leading=14, spaceBefore=10, spaceAfter=6))
+                styles.add(ParagraphStyle(
+                    name="H3", fontName=base_font, fontSize=12, leading=14,
+                    spaceBefore=10, spaceAfter=6
+                ))
+            if "Small" not in styles:
+                styles.add(ParagraphStyle(
+                    name="Small", fontName=base_font, fontSize=9, leading=11,
+                    textColor=colors.HexColor("#6B7280")
+                ))
 
             doc = SimpleDocTemplate(
                 out_path, pagesize=A4,
@@ -1877,39 +1885,68 @@ class EEGApp(_BaseTk):
             )
 
             story = []
+
             story.append(Paragraph("Отчёт: Лямбда-ритмы ЭЭГ при разных воздействиях", styles["Heading1"]))
-            story.append(Spacer(1, 0.3 * cm))
-            story.append(Paragraph(f"Расположение электродов: {self.eeg_montage.get()}", styles["Normal"]))
-            story.append(Paragraph(f"FS (Гц): {self._last_fs_user}", styles["Normal"]))
-            story.append(Paragraph(f"λ-диапазон: {LAMBDA_BAND_HZ[0]}–{LAMBDA_BAND_HZ[1]} Гц", styles["Normal"]))
-            story.append(Paragraph(f"α-диапазон: {ALPHA_BAND_HZ[0]}–{ALPHA_BAND_HZ[1]} Гц", styles["Normal"]))
-            story.append(Spacer(1, 0.5 * cm))
+            story.append(Spacer(1, 0.25 * cm))
+            story.append(Paragraph(f"Дата формирования: {datetime.now().strftime('%d.%m.%Y %H:%M')}", styles["Small"]))
+            story.append(Paragraph(f"Электроды/монтаж: {self.eeg_montage.get()}", styles["Small"]))
+            story.append(Paragraph(f"FS (Гц): {self._last_fs_user}", styles["Small"]))
+            story.append(Paragraph(f"λ-диапазон: {LAMBDA_BAND_HZ[0]}–{LAMBDA_BAND_HZ[1]} Гц", styles["Small"]))
+            story.append(Paragraph(f"α-диапазон: {ALPHA_BAND_HZ[0]}–{ALPHA_BAND_HZ[1]} Гц", styles["Small"]))
+            story.append(Spacer(1, 0.4 * cm))
 
-            story.append(Paragraph("Таблица 1: Мощности по диапазонам (Welch PSD)", styles["Heading2"]))
-            story.append(_df_to_rl_table(self.band_power_df, base_font))
-            story.append(Spacer(1, 0.5 * cm))
+            story.append(Paragraph("1. Теория", styles["Heading2"]))
+            story.append(Spacer(1, 0.15 * cm))
 
-            story.append(Paragraph("Таблица 2: Статистики мощности λ(t)", styles["Heading2"]))
-            story.append(_df_to_rl_table(self.lambda_time_df, base_font))
-            story.append(Spacer(1, 0.5 * cm))
+            theory_lines = [
+                f"λ-ритм — активность ЭЭГ в диапазоне {LAMBDA_BAND_HZ[0]}–{LAMBDA_BAND_HZ[1]} Гц (по методичке).",
+                "PSD (Welch) — спектральная оценка мощности сигнала по частотам (удобно сравнивать диапазоны).",
+                "Мощность диапазона — интеграл PSD по частоте внутри выбранного диапазона.",
+                "Полосовая фильтрация — выделяет колебания только в нужной полосе (например, 4–6 Гц для λ).",
+                "λ(t) — динамика мощности λ-компоненты во времени (через скользящее окно).",
+                "Важно: на результаты влияют артефакты (движения/моргания), контакт электродов и правильный FS.",
+            ]
+            for s in theory_lines:
+                story.append(Paragraph("• " + s, styles["Normal"]))
 
-            story.append(Paragraph("Таблица 3: Сводная", styles["Heading2"]))
-            story.append(_df_to_rl_table(self.summary_df, base_font))
             story.append(PageBreak())
 
-            story.append(Paragraph("Анализ и выводы", styles["Heading2"]))
+            story.append(Paragraph("2. Анализ", styles["Heading2"]))
+            story.append(Spacer(1, 0.15 * cm))
+
             text = self.conclusions_text or "Выводы не сформированы. Запустите анализ перед экспортом отчёта."
             for line in text.split("\n"):
                 line = line.strip()
                 if not line:
-                    story.append(Spacer(1, 0.15 * cm))
+                    story.append(Spacer(1, 0.12 * cm))
                 else:
                     story.append(Paragraph(line, styles["Normal"]))
+
             story.append(PageBreak())
+
+            story.append(Paragraph("3. Таблицы", styles["Heading2"]))
+            story.append(Spacer(1, 0.15 * cm))
+
+            story.append(Paragraph("Таблица 1: Мощности по диапазонам (Welch PSD)", styles["H3"]))
+            story.append(_df_to_rl_table(self.band_power_df, base_font))
+            story.append(Spacer(1, 0.35 * cm))
+
+            story.append(Paragraph("Таблица 2: Статистики мощности λ(t)", styles["H3"]))
+            story.append(_df_to_rl_table(self.lambda_time_df, base_font))
+            story.append(Spacer(1, 0.35 * cm))
+
+            story.append(Paragraph("Таблица 3: Сводная", styles["H3"]))
+            story.append(_df_to_rl_table(self.summary_df, base_font))
+
+            story.append(PageBreak())
+
+            story.append(Paragraph("4. Графики", styles["Heading2"]))
+            story.append(Spacer(1, 0.15 * cm))
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 self._ui_queue.put(("status", "PDF: графики…"))
 
+                story.append(Paragraph("4.1 Сравнение условий", styles["H3"]))
                 if self._compare_allowed:
                     bars_path = os.path.join(tmpdir, "bars.png")
                     fig_b = make_bars_figure(self.summary_df)
@@ -1918,67 +1955,63 @@ class EEGApp(_BaseTk):
                         plt.close(fig_b)
                     except Exception:
                         pass
-
-                    story.append(Paragraph("Сравнение условий: mean/max/min мощности λ(t)", styles["Heading2"]))
                     story.append(_rl_image(bars_path, max_width_cm=17.5))
-                    story.append(PageBreak())
                 else:
-                    story.append(Paragraph("Сравнение условий", styles["Heading2"]))
-                    story.append(Paragraph(self._compare_reason or "Сравнение недоступно для текущего набора файлов.", styles["Normal"]))
-                    story.append(PageBreak())
+                    story.append(Paragraph(
+                        self._compare_reason or "Сравнение недоступно для текущего набора файлов.",
+                        styles["Normal"]
+                    ))
+                story.append(PageBreak())
 
-                for idx, r in enumerate(self._last_records, start=1):
+                for idx, r in enumerate(self._last_records or [], start=1):
                     self._ui_queue.put(("status", f"PDF: файл {idx}/{len(self._last_records)}…"))
 
                     name = r["name"]
                     t = r["t"]
                     x = r["x"]
                     fs_hz = r["fs"]
+                    ch_label = r.get("electrode_label", "")
 
-                    story.append(Paragraph(f"Файл: {name}", styles["Heading2"]))
-                    story.append(Paragraph(f"Канал: {r['sig_col']} | FS: {fs_hz}", styles["Normal"]))
-                    story.append(Spacer(1, 0.25 * cm))
+                    story.append(Paragraph(f"4.{idx+1} {name}", styles["H3"]))
+                    story.append(Paragraph(f"Канал CSV: {r.get('sig_col','')} | Электрод/подпись: {ch_label} | FS: {fs_hz}", styles["Small"]))
+                    story.append(Spacer(1, 0.2 * cm))
 
-                    raw_path = os.path.join(tmpdir, f"{name}_raw.png")
-                    psd_path = os.path.join(tmpdir, f"{name}_psd.png")
-                    lam_path = os.path.join(tmpdir, f"{name}_lambda.png")
+                    raw_path = os.path.join(tmpdir, f"{name}_{idx}_raw.png")
+                    psd_path = os.path.join(tmpdir, f"{name}_{idx}_psd.png")
+                    lam_path = os.path.join(tmpdir, f"{name}_{idx}_lambda.png")
 
-                    fig1 = make_raw_figure(t, x, fs_hz, f"{name} — {r.get('electrode_label','')}".strip(" —"), for_pdf=True)
+                    fig1 = make_raw_figure(t, x, fs_hz, name, channel_label=ch_label, for_pdf=True)
                     save_figure_png_threadsafe(fig1, raw_path, dpi=160)
-                    try:
-                        plt.close(fig1)
-                    except Exception:
-                        pass
+                    try: plt.close(fig1)
+                    except Exception: pass
 
-                    fig2 = make_psd_figure(x, fs_hz, f"{name} — {r.get('electrode_label','')}".strip(" —"), for_pdf=True)
+                    fig2 = make_psd_figure(x, fs_hz, file_label=name, channel_label=ch_label, for_pdf=True)
                     save_figure_png_threadsafe(fig2, psd_path, dpi=160)
-                    try:
-                        plt.close(fig2)
-                    except Exception:
-                        pass
+                    try: plt.close(fig2)
+                    except Exception: pass
 
-                    fig3 = make_lambda_figure(t, x, fs_hz, f"{name} — {r.get('electrode_label','')}".strip(" —"), for_pdf=True)
+                    fig3 = make_lambda_figure(t, x, fs_hz, file_label=name, channel_label=ch_label, for_pdf=True)
                     save_figure_png_threadsafe(fig3, lam_path, dpi=160)
-                    try:
-                        plt.close(fig3)
-                    except Exception:
-                        pass
+                    try: plt.close(fig3)
+                    except Exception: pass
 
-                    story.append(Paragraph("Сигнал (общий вид + зум)", styles["H3"]))
+                    story.append(Paragraph("Сигнал во времени", styles["Normal"]))
                     story.append(_rl_image(raw_path, max_width_cm=17.5))
-                    story.append(Spacer(1, 0.4 * cm))
+                    story.append(Spacer(1, 0.35 * cm))
 
-                    story.append(Paragraph("Спектр (Welch PSD) + выделение диапазонов", styles["H3"]))
+                    story.append(Paragraph("Спектр мощности (Welch PSD)", styles["Normal"]))
                     story.append(_rl_image(psd_path, max_width_cm=17.5))
-                    story.append(Spacer(1, 0.4 * cm))
+                    story.append(Spacer(1, 0.35 * cm))
 
-                    story.append(Paragraph("λ-ритм (4–6 Гц) + мощность λ(t)", styles["H3"]))
+                    story.append(Paragraph("λ-ритм (4–6 Гц) и мощность λ(t)", styles["Normal"]))
                     story.append(_rl_image(lam_path, max_width_cm=17.5))
+
                     story.append(PageBreak())
 
             self._ui_queue.put(("status", "PDF: сборка…"))
             doc.build(story)
             self._ui_queue.put(("pdf_done", out_path))
+
         except Exception as e:
             self._ui_queue.put(("pdf_error", str(e)))
 

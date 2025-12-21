@@ -8,9 +8,6 @@ from scipy.signal import welch, butter, filtfilt
 from config import LAMBDA_BAND_HZ, ALPHA_BAND_HZ
 
 
-# ============================================================
-# PSD (Welch) + мощность по диапазонам
-# ============================================================
 def compute_psd(x: np.ndarray, fs_hz: float, nperseg: int = 1024) -> Tuple[np.ndarray, np.ndarray]:
     """
     Оценка спектральной плотности мощности (PSD) методом Уэлча.
@@ -27,7 +24,6 @@ def compute_psd(x: np.ndarray, fs_hz: float, nperseg: int = 1024) -> Tuple[np.nd
     if x.size < 8 or not np.isfinite(fs_hz) or fs_hz <= 0:
         return np.asarray([]), np.asarray([])
 
-    # nperseg не должен быть больше длины сигнала
     nper = int(min(nperseg, max(64, x.size)))
     freqs_hz, psd = welch(x, fs=fs_hz, nperseg=nper)
     return freqs_hz, psd
@@ -59,9 +55,6 @@ def integrate_band_power(freqs_hz: np.ndarray, psd: np.ndarray, band_hz: Tuple[f
     return float(np.trapz(psd[m], freqs_hz[m]))
 
 
-# ============================================================
-# Полосовая фильтрация (Butterworth) + filtfilt
-# ============================================================
 def butter_bandpass(x: np.ndarray, low_hz: float, high_hz: float, fs_hz: float, order: int = 4) -> np.ndarray:
     """
     Полосовой фильтр Баттерворта + filtfilt (нулевая фазовая задержка).
@@ -76,7 +69,6 @@ def butter_bandpass(x: np.ndarray, low_hz: float, high_hz: float, fs_hz: float, 
     low = max(0.001, low_hz / nyq)
     high = min(0.999, high_hz / nyq)
 
-    # Проверка диапазона
     if not (0.0 < low < high < 1.0):
         return x.copy()
 
@@ -97,9 +89,6 @@ def extract_lambda_signal(x: np.ndarray, fs_hz: float) -> np.ndarray:
     )
 
 
-# ============================================================
-# λ(t) — мощность в скользящем окне
-# ============================================================
 def sliding_window_power(
     x: np.ndarray,
     fs_hz: float,
@@ -136,9 +125,6 @@ def sliding_window_power(
     return np.asarray(t_vals), np.asarray(p_vals)
 
 
-# ============================================================
-# Выводы (вкладка "Анализ и выводы" + PDF)
-# ============================================================
 def _safe_num(v: Any) -> Optional[float]:
     try:
         x = float(v)
@@ -171,7 +157,6 @@ def build_conclusions(
 
     df = summary_df.copy()
 
-    # Колонки (как в твоём app.py)
     file_col = "Файл" if "Файл" in df.columns else None
     ch_col = "Электрод/канал" if "Электрод/канал" in df.columns else None
 
@@ -182,12 +167,10 @@ def build_conclusions(
     ratio_lam_col = "P_λ / P_total" if "P_λ / P_total" in df.columns else None
     ratio_alp_col = "P_α / P_total" if "P_α / P_total" in df.columns else None
 
-    # Приведём важные числовые столбцы к float
     for c in ["P_total", "P_λ", "P_α", ratio_lam_col, ratio_alp_col, lam_t_mean_col, lam_t_max_col, lam_t_min_col]:
         if c and c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # Определим режим (1 файл / несколько)
     n_files = df[file_col].nunique() if file_col else len(df)
     used_channels: List[str] = []
     if ch_col:
@@ -195,7 +178,6 @@ def build_conclusions(
 
     lines: List[str] = []
 
-    # ---------------- Заголовок ----------------
     lines.append("АНАЛИЗ И ВЫВОДЫ ПО РЕЗУЛЬТАТАМ ИССЛЕДОВАНИЯ λ-РИТМА")
     lines.append("")
     lines.append(f"Частота дискретизации (FS): {fs_user:.3f} Гц.")
@@ -210,7 +192,6 @@ def build_conclusions(
     lines.append("Режим анализа: " + ("анализ одного файла." if n_files <= 1 else "сравнительный анализ нескольких файлов/условий."))
     lines.append("")
 
-    # ---------------- Теория ----------------
     lines.append("1. Теоретическая справка (кратко)")
     lines.append(
         f"λ-ритм рассматривается как активность ЭЭГ в диапазоне {LAMBDA_BAND_HZ[0]}–{LAMBDA_BAND_HZ[1]} Гц "
@@ -226,7 +207,6 @@ def build_conclusions(
     lines.append("• Средняя/максимальная/минимальная мощность λ(t) отражает динамику выраженности λ-ритма во времени.")
     lines.append("")
 
-    # ---------------- Качество и факторы ----------------
     lines.append("3. Факторы, влияющие на достоверность результатов")
     lines.append(
         "На результаты могут существенно влиять артефакты (движения, моргания), качество контакта электродов, "
@@ -234,10 +214,8 @@ def build_conclusions(
     )
     lines.append("")
 
-    # ---------------- Числовая сводка ----------------
     lines.append("4. Числовая сводка результатов")
 
-    # Если есть только 1 файл: просто сводка по одному
     if n_files <= 1:
         row = df.dropna(subset=[lam_t_mean_col] if lam_t_mean_col else []).iloc[0] if not df.empty else df.iloc[0]
 
@@ -279,10 +257,8 @@ def build_conclusions(
         )
         return "\n".join(lines)
 
-    # Если файлов несколько: сравнение (по доле λ, иначе по средней λ(t))
     comp_df = df.copy()
 
-    # Приоритет: сравнение по доле λ
     if ratio_lam_col and ratio_lam_col in comp_df.columns and comp_df[ratio_lam_col].notna().any():
         comp_df = comp_df.dropna(subset=[ratio_lam_col])
         best = comp_df.sort_values(ratio_lam_col, ascending=False).iloc[0]
@@ -334,7 +310,6 @@ def build_conclusions(
         lines.append("Недостаточно данных для автоматического сравнения (не найдены ключевые числовые показатели).")
         lines.append("")
 
-    # ---------------- Итоговые выводы ----------------
     lines.append("5. Итоговые выводы")
     lines.append(
         "При сравнительном анализе можно оценить, в каких записях/условиях λ-компонента выражена сильнее. "

@@ -22,15 +22,13 @@ from matplotlib import font_manager
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-# Optional MNE (for 10–20 montage coordinates)
 try:
     import mne
     MNE_OK = True
 except Exception:
-    mne = None  # type: ignore
+    mne = None
     MNE_OK = False
 
-# --- optional deps ---
 DND_OK = False
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -74,9 +72,6 @@ from signal_analysis import (
 from plotting import make_raw_figure, make_psd_figure, make_lambda_figure, make_bars_figure
 
 
-# ---------------------------
-# Scrollable helpers
-# ---------------------------
 class ScrollablePlotArea(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
@@ -151,9 +146,6 @@ class ScrollableFrame(ttk.Frame):
             self.canvas.yview_scroll(2, "units")
 
 
-# ---------------------------
-# Serial
-# ---------------------------
 @dataclass
 class SerialConfig:
     port: str = ""
@@ -233,9 +225,7 @@ class ArduinoSerialStreamer(threading.Thread):
 _BaseTk = TkinterDnD.Tk if DND_OK else tk.Tk
 
 
-# ---------------------------
-# ReportLab helpers
-# ---------------------------
+
 def _df_to_rl_table(df: Optional[pd.DataFrame], font_name: str):
     styles = getSampleStyleSheet()
     if df is None or df.empty:
@@ -272,17 +262,15 @@ def _rl_image(path: str, max_width_cm: float = 17.0):
     return img
 
 
-# ---------------------------
-# App
-# ---------------------------
+
 class EEGApp(_BaseTk):
     def __init__(self):
         super().__init__()
         apply_mpl_style()
 
-        # --- LIVE defaults (важно: до _build_ui)
+    
         self.live_channels = 1
-        self.live_xs: List[List[float]] = [[]]  # список каналов
+        self.live_xs: List[List[float]] = [[]]
         self.live_t: List[float] = []
 
         self.title("Лямбда-ритмы ЭЭГ при разных воздействиях")
@@ -311,7 +299,6 @@ class EEGApp(_BaseTk):
         self._pdf_thread: Optional[threading.Thread] = None
         self._pdf_busy = False
 
-        # ---- 10–20 electrode selection (global state) ----
         self.selected_electrodes: List[str] = []
         self.max_selected_electrodes: int = 3
         self.stream_labels: List[str] = []
@@ -319,7 +306,6 @@ class EEGApp(_BaseTk):
         self._stream_time_offset = 0.0
         self._last_live_draw_ts = 0.0
 
-        # сравнение (BARS) доступно/нет
         self._compare_allowed: bool = False
         self._compare_reason: str = ""
 
@@ -330,9 +316,6 @@ class EEGApp(_BaseTk):
         self.after(60, self._poll_serial_queue)
         self.after(60, self._poll_ui_queue)
 
-    # ----------------------------
-    # Compare mode availability
-    # ----------------------------
     def _try_read_csv_quick(self, p: str) -> Optional[pd.DataFrame]:
         try:
             return pd.read_csv(p, sep=None, engine="python")
@@ -411,14 +394,12 @@ class EEGApp(_BaseTk):
                     self._compare_allowed = True
                     self._compare_reason = ""
 
-        # Применяем к UI (если радиокнопка уже создана)
         if hasattr(self, "rb_bars") and self.rb_bars is not None:
             try:
                 self.rb_bars.config(state=("normal" if self._compare_allowed else "disabled"))
             except Exception:
                 pass
 
-        # Если сейчас выбран режим BARS, а он стал недоступен -> переключаем на RAW
         if hasattr(self, "plot_mode"):
             try:
                 if self.plot_mode.get() == "BARS" and not self._compare_allowed:
@@ -427,9 +408,7 @@ class EEGApp(_BaseTk):
             except Exception:
                 pass
 
-    # ---------------------------
-    # shared helpers
-    # ---------------------------
+
     def _reset_live_plot_lines(self, n_channels: int, labels: Optional[List[str]] = None):
         n_channels = max(1, int(n_channels))
         self.live_channels = n_channels
@@ -489,9 +468,7 @@ class EEGApp(_BaseTk):
                 return max(1, min(counts))
         return 3
 
-    # ---------------------------
-    # style
-    # ---------------------------
+
     def _setup_style(self):
         style = ttk.Style(self)
         try:
@@ -571,9 +548,6 @@ class EEGApp(_BaseTk):
         self.option_add("*TCombobox*Listbox.highlightThickness", 1)
         self.option_add("*TCombobox*Listbox.highlightBackground", UI["border"])
 
-    # ---------------------------
-    # UI
-    # ---------------------------
     def _build_ui(self):
         topbar = ttk.Frame(self)
         topbar.pack(fill="x", padx=12, pady=(12, 0))
@@ -597,10 +571,8 @@ class EEGApp(_BaseTk):
         self._build_files_tab()
         self._build_analysis_tab()
 
-        # важное: после сборки — обновить доступность сравнения
         self._update_compare_mode_availability()
 
-    # ---------------- help ----------------
     def _show_help_dialog(self) -> None:
         win = tk.Toplevel(self)
         win.title("Инструкция")
@@ -684,7 +656,6 @@ class EEGApp(_BaseTk):
         footer.pack(fill="x")
         ttk.Button(footer, text="Закрыть", command=win.destroy).pack(side="right")
 
-    # ---------------- live ----------------
     def _build_live_tab(self):
         root = ttk.Frame(self.tab_live)
         root.pack(fill="both", expand=True)
@@ -979,7 +950,6 @@ class EEGApp(_BaseTk):
             if hasattr(self, "_refresh_files_count"):
                 self._refresh_files_count()
 
-        # ✅ обновить доступность сравнения
         self._update_compare_mode_availability()
 
         messagebox.showinfo("Добавлено", "Запись добавлена во вкладку «Файлы» и готова к анализу.")
@@ -1010,7 +980,6 @@ class EEGApp(_BaseTk):
 
         messagebox.showinfo("Сохранено", f"CSV сохранён:\n{path}")
 
-    # ---------------- 10–20 ----------------
     def _build_1020_tab(self):
         root = ttk.Frame(self.tab_1020)
         root.pack(fill="both", expand=True)
@@ -1365,7 +1334,6 @@ class EEGApp(_BaseTk):
                 self.lst_files.insert("end", p)
         self._refresh_files_count()
 
-        # ✅ обновить доступность сравнения
         self._update_compare_mode_availability()
 
     def remove_selected_file(self):
@@ -1378,7 +1346,6 @@ class EEGApp(_BaseTk):
         self.loaded_files = [p for p in self.loaded_files if p != path]
         self._refresh_files_count()
 
-        # ✅ обновить доступность сравнения
         self._update_compare_mode_availability()
 
     def clear_file_list(self):
@@ -1386,10 +1353,8 @@ class EEGApp(_BaseTk):
         self.loaded_files.clear()
         self._refresh_files_count()
 
-        # ✅ обновить доступность сравнения
         self._update_compare_mode_availability()
 
-    # ---------------- analysis ----------------
     def _build_analysis_tab(self):
         root = ttk.Frame(self.tab_analysis)
         root.pack(fill="both", expand=True)
@@ -1497,7 +1462,6 @@ class EEGApp(_BaseTk):
         self.txt_conclusions.insert("1.0", "Запустите анализ, чтобы сформировать выводы.")
         self.txt_conclusions.config(state="disabled")
 
-        # ✅ сразу применим правило сравнения
         self._update_compare_mode_availability()
 
     def _set_status(self, text: str):
@@ -1562,7 +1526,6 @@ class EEGApp(_BaseTk):
             fs_user = FS_HZ_DEFAULT
         self._last_fs_user = fs_user
 
-        # ✅ перед анализом обновим правило сравнения (на случай свежих файлов)
         self._update_compare_mode_availability()
 
         self._busy(True, "Анализ: запуск…")
@@ -1743,7 +1706,6 @@ class EEGApp(_BaseTk):
                 self.summary_df = payload["summary_df"]
                 self._last_records = payload["records"]
 
-                # ✅ после анализа ещё раз применим правило сравнения (на всякий)
                 self._update_compare_mode_availability()
 
                 self._render_current_table()
@@ -1761,11 +1723,11 @@ class EEGApp(_BaseTk):
                 self.txt_conclusions.insert("1.0", self.conclusions_text)
                 self.txt_conclusions.config(state="disabled")
 
-                self._busy(False, "Готово ✅")
+                self._busy(False, "Готово")
 
             elif kind == "pdf_done":
                 self._pdf_busy = False
-                self._busy(False, "Готово ✅")
+                self._busy(False, "Готово")
                 messagebox.showinfo("PDF", f"Отчёт сохранён:\n{payload}")
 
             elif kind == "pdf_error":
@@ -1828,7 +1790,6 @@ class EEGApp(_BaseTk):
         mode = self.plot_mode.get()
 
         if mode == "BARS":
-            # ✅ если режим недоступен — показываем причину и выходим
             if not self._compare_allowed:
                 msg = self._compare_reason or "Сравнение недоступно."
                 wrap = ttk.Frame(self.plot_area.inner, padding=14, style="Card.TFrame")
@@ -1863,7 +1824,6 @@ class EEGApp(_BaseTk):
             canv.get_tk_widget().pack(fill="x", expand=True)
             canv.draw()
 
-    # ---------------- PDF ----------------
     def export_report_pdf(self):
         if self._analysis_busy or self._pdf_busy:
             return
@@ -1947,7 +1907,6 @@ class EEGApp(_BaseTk):
             with tempfile.TemporaryDirectory() as tmpdir:
                 self._ui_queue.put(("status", "PDF: графики…"))
 
-                # ✅ Сравнение в PDF только если разрешено правилом
                 if self._compare_allowed:
                     bars_path = os.path.join(tmpdir, "bars.png")
                     fig_b = make_bars_figure(self.summary_df)

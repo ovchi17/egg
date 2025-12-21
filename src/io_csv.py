@@ -109,7 +109,6 @@ def load_time_and_channel(csv_path: str, channel: str) -> Tuple[np.ndarray, np.n
             s = s.astype(str).str.replace(",", ".", regex=False)
         return pd.to_numeric(s, errors="coerce")
 
-    # ищем колонку времени (если есть)
     time_col = None
     for c in df.columns:
         if "time" in str(c).lower() or "время" in str(c).lower():
@@ -147,7 +146,6 @@ def list_numeric_channels(csv_path: str) -> Tuple[List[str], str]:
             s = s.astype(str).str.replace(",", ".", regex=False)
         return pd.to_numeric(s, errors="coerce")
 
-    # время
     time_col = None
     for c in df.columns:
         if "time" in str(c).lower() or "время" in str(c).lower():
@@ -160,7 +158,6 @@ def list_numeric_channels(csv_path: str) -> Tuple[List[str], str]:
         if sn.notna().sum() >= max(5, int(0.05 * len(df))):
             numeric_cols.append(str(c))
 
-    # каналы = числовые кроме времени
     channels = [c for c in numeric_cols if time_col is None or c != time_col]
 
     return channels, (time_col if time_col is not None else "synthetic_time")

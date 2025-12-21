@@ -1,4 +1,3 @@
-# fake_arduino_serial.py
 # macOS/Linux: creates a virtual serial port and streams 3-channel data like "v1,v2,v3\n"
 
 import os
@@ -36,7 +35,7 @@ def main():
     master_fd, slave_fd = pty.openpty()
     slave_name = os.ttyname(slave_fd)
 
-    print("\n✅ Виртуальный serial создан!")
+    print("\nВиртуальный serial создан!")
     print("Подключайся в твоём приложении к порту:")
     print(f"   {slave_name}\n")
     print("Формат строк: ch1,ch2,ch3\\n")
@@ -71,7 +70,7 @@ def main():
             os.close(slave_fd)
         except Exception:
             pass
-        print("\n🛑 Остановлено.")
+        print("\nОстановлено.")
 
 
 if __name__ == "__main__":

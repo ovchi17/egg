@@ -1,3 +1,7 @@
+# io_csv.py
+# Работа с CSV: чтение файла, поиск колонки времени и сигнала/канала,
+# оценка частоты дискретизации (FS) и список числовых каналов.
+
 from __future__ import annotations
 import os
 from typing import Tuple, List

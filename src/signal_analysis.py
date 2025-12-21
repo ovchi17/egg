@@ -1,3 +1,6 @@
+# signal_analysis.py
+# Функции анализа ЭЭГ: PSD (Welch), мощность в диапазонах, полосовой фильтр λ, мощность λ(t) во времени и текст выводов.
+
 from __future__ import annotations
 
 from typing import Tuple, List, Dict, Any, Optional

@@ -1,3 +1,6 @@
+# config.py
+# Здесь лежат константы (FS, диапазоны λ/α), цвета/шрифты интерфейса и функции, которые задают единый стиль графиков и сохраняют matplotlib-фигуры в PNG.
+
 from __future__ import annotations
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure

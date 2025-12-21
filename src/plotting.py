@@ -1,3 +1,6 @@
+# plotting.py
+# Построение графиков для приложения и PDF: сигнал во времени, PSD (Welch), выделение λ-ритма, сравнение столбиками.
+
 from __future__ import annotations
 
 from typing import Optional

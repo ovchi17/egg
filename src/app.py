@@ -1,3 +1,6 @@
+# app.py
+# Главное GUI-приложение: онлайн-запись с Arduino, выбор электродов 10–20, загрузка CSV, анализ и экспорт PDF.
+
 from __future__ import annotations
 
 import os

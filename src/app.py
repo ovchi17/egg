@@ -902,9 +902,22 @@ class EEGApp(_BaseTk):
 
         # фиксируем электроды на момент старта
         # В онлайн-режиме по умолчанию ожидаем 1 канал (A0). Выбор электродов здесь — это метка.
-        label = ", ".join(list(getattr(self, "selected_electrodes", [])))
-        self.stream_labels = [label] if label else ["A0"]
-        n_channels = 1
+                # Требование курсовой: перед записью выберите электрод(ы) во вкладке 10–20
+        selected = list(getattr(self, "selected_electrodes", []))
+        if not selected:
+            messagebox.showinfo(
+                "Выбор электродов",
+                "Перед стартом выберите электрод(ы) во вкладке «Система 10–20» (минимум 1)."
+            )
+            return
+
+        # Сколько каналов хотим в онлайн-режиме:
+        # - если выбрано 2–3 электрода -> считаем, что стрим должен отдавать 2–3 чисел в строке
+        # - если устройство/фейк отдаёт меньше — лишние не появятся (это нормально)
+        n_channels = max(1, min(len(selected), self.max_selected_electrodes))
+
+        # Метки линий = по одному электроду на канал (а НЕ одной строкой через запятую)
+        self.stream_labels = selected[:n_channels]
 
         port = (self.cbo_port.get() or "").strip()
         available_ports = list(self.cbo_port.cget('values') or [])

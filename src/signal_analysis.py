@@ -54,7 +54,6 @@ def integrate_band_power(freqs_hz: np.ndarray, psd: np.ndarray, band_hz: Tuple[f
     if not np.any(m):
         return float("nan")
 
-    # Интеграл PSD по частоте ≈ мощность в диапазоне
     return float(np.trapz(psd[m], freqs_hz[m]))
 
 

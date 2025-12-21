@@ -1648,7 +1648,6 @@ class EEGApp(_BaseTk):
                         "Канал (CSV)": r["sig_col"],
                         "FS (Гц)": r["fs"],
                         "Длительность (с)": r["duration_s"],
-                        "Доля NaN": r["nan_ratio"],
                         "P_total": p_total,
                         "P_λ": p_lambda,
                         "P_α": p_alpha,
